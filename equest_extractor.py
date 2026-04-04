@@ -10,6 +10,10 @@ import zipfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Dict, List
+try:
+    from openpyxl import load_workbook
+except ImportError:  # pragma: no cover - optional dependency for safer workbook writes
+    load_workbook = None
 END_USE_COLUMNS = [
     "LIGHTS",
     "TASK LIGHTS",
@@ -69,6 +73,7 @@ LV_I_ROW_PATTERN = re.compile(
 )
 LV_I_UVALUE_UNIT_PATTERN = re.compile(r"U-VALUE\s*\(([^\)]+)\)", re.IGNORECASE)
 LS_A_LOAD_UNIT_PATTERN = re.compile(r"COOLING LOAD\s*\(([^\)]+)\)", re.IGNORECASE)
+REPORT_HEADER_PATTERN = re.compile(r"REPORT-\s*([A-Z0-9\-]+)", re.IGNORECASE)
 MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 NS = {"m": MAIN_NS}
 MASTER_ROOM_LIST_SHEET_XML_PATH = "xl/worksheets/sheet1.xml"
@@ -121,12 +126,36 @@ def _parse_values_line(line: str) -> tuple[str, List[float]]:
             f"Expected {len(END_USE_COLUMNS)} numeric BEPS columns but found {len(numbers)} in line: {line!r}"
         )
     return unit, numbers
+
+
+def detect_available_reports(sim_text: str) -> Dict[str, object]:
+    """Return discovered REPORT-* identifiers from a SIM file."""
+    discovered = []
+    seen = set()
+    for line in sim_text.splitlines():
+        match = REPORT_HEADER_PATTERN.search(line)
+        if not match:
+            continue
+        report_id = match.group(1).upper()
+        if report_id in seen:
+            continue
+        seen.add(report_id)
+        discovered.append(report_id)
+    return {
+        "available_reports": discovered,
+        "has_beps": "BEPS" in seen,
+        "has_lv_b": "LV-B" in seen,
+        "has_es_d": "ES-D" in seen,
+    }
 def extract_beps_report(sim_text: str) -> Dict[str, object]:
     """Parse BEPS and return electricity/natural-gas totals for each end-use column."""
     lines = sim_text.splitlines()
     report_start = next((i for i, line in enumerate(lines) if "REPORT- BEPS" in line.upper()), None)
     if report_start is None:
-        raise ValueError("Could not find 'REPORT- BEPS' in the SIM file.")
+        raise ValueError(
+            "Could not find 'REPORT- BEPS' in the SIM file. "
+            "The SIM may be truncated/cut off before BEPS; run with '--list-reports' to verify report availability."
+        )
     section_lines = lines[report_start : report_start + 300]
     rows: Dict[str, Dict[str, object]] = {}
     idx = 0
@@ -592,6 +621,31 @@ def populate_master_room_list_space_type_table(
     spaces = list(lv_b_result["spaces"].items())
     if not spaces:
         raise ValueError("No LV-B spaces found to populate the Master Room List.")
+    if load_workbook is not None:
+        workbook = load_workbook(workbook_path, keep_vba=True)
+        sheet = workbook["Master Room List"]
+        max_rows = MASTER_ROOM_LIST_SPACE_MAX_ROWS
+        start_row = MASTER_ROOM_LIST_SPACE_START_ROW
+        for index in range(max_rows):
+            row_number = start_row + index
+            if index < len(spaces):
+                space_name, space_data = spaces[index]
+                sheet[f"D{row_number}"] = space_name
+                sheet[f"G{row_number}"] = float(space_data["area_sqft"])
+            else:
+                sheet[f"D{row_number}"] = None
+                sheet[f"G{row_number}"] = None
+        workbook.save(output_workbook_path)
+        return {
+            "target_sheet": "Master Room List",
+            "target_table": "Space Type Table",
+            "writer": "openpyxl",
+            "rows_available": max_rows,
+            "spaces_found": len(spaces),
+            "spaces_written": min(len(spaces), max_rows),
+            "spaces_truncated": max(len(spaces) - max_rows, 0),
+            "output_workbook": str(output_workbook_path),
+        }
     ET.register_namespace("", MAIN_NS)
     file_map = _load_zip_file_map(workbook_path)
     if MASTER_ROOM_LIST_SHEET_XML_PATH not in file_map:
@@ -689,6 +743,46 @@ def populate_ecm_data_from_reports(
     elec_cost = total_electric_kbtu * elec_rate_per_kbtu
     gas_cost = total_gas_kbtu * gas_rate_per_kbtu
     total_cost = elec_cost + gas_cost
+    section_start = ECM_DATA_MODEL_START_ROWS[normalized_model_run_type]
+    energy_row_number = section_start + 4
+    demand_row_number = section_start + 5
+    total_elec_row_number = section_start + 6
+    total_gas_row_number = section_start + 7
+    total_energy_row_number = section_start + 8
+    if load_workbook is not None:
+        workbook = load_workbook(workbook_path, keep_vba=True)
+        sheet = workbook["ECM Data"]
+        for col in "BCDEFGHIJKLMNOPQRST":
+            sheet[f"{col}{energy_row_number}"] = None
+            sheet[f"{col}{demand_row_number}"] = None
+        for col, value in end_use_values_kbtu.items():
+            sheet[f"{col}{energy_row_number}"] = value
+        sheet[f"B{total_elec_row_number}"] = total_electric_kbtu
+        sheet[f"B{total_gas_row_number}"] = total_gas_kbtu
+        sheet[f"B{total_energy_row_number}"] = total_energy_kbtu
+        sheet[f"D{total_elec_row_number}"] = elec_cost
+        sheet[f"D{total_gas_row_number}"] = gas_cost
+        sheet[f"D{total_energy_row_number}"] = total_cost
+        sheet[f"F{total_elec_row_number}"] = elec_rate_per_kbtu
+        sheet[f"F{total_gas_row_number}"] = gas_rate_per_kbtu
+        workbook.save(output_workbook_path)
+        return {
+            "sheet": "ECM Data",
+            "writer": "openpyxl",
+            "model_run_type": model_run_type,
+            "section_start_row": section_start,
+            "end_use_columns_written": sorted(end_use_values_kbtu.keys()),
+            "left_blank_columns": ECM_OPTIONAL_BLANK_COLUMNS,
+            "total_electric_kbtu": total_electric_kbtu,
+            "total_gas_kbtu": total_gas_kbtu,
+            "total_energy_kbtu": total_energy_kbtu,
+            "elec_virtual_rate_per_kbtu": elec_rate_per_kbtu,
+            "gas_virtual_rate_per_kbtu": gas_rate_per_kbtu,
+            "elec_cost": elec_cost,
+            "gas_cost": gas_cost,
+            "total_cost": total_cost,
+            "output_workbook": str(output_workbook_path),
+        }
     ET.register_namespace("", MAIN_NS)
     file_map = _load_zip_file_map(workbook_path)
     if ECM_DATA_SHEET_XML_PATH not in file_map:
@@ -697,12 +791,6 @@ def populate_ecm_data_from_reports(
     sheet_data = sheet_root.find("m:sheetData", NS)
     if sheet_data is None:
         raise ValueError("ECM Data sheet is missing sheetData.")
-    section_start = ECM_DATA_MODEL_START_ROWS[normalized_model_run_type]
-    energy_row_number = section_start + 4
-    demand_row_number = section_start + 5
-    total_elec_row_number = section_start + 6
-    total_gas_row_number = section_start + 7
-    total_energy_row_number = section_start + 8
     energy_row = _ensure_row(sheet_data, energy_row_number)
     demand_row = _ensure_row(sheet_data, demand_row_number)
     total_elec_row = _ensure_row(sheet_data, total_elec_row_number)
@@ -745,6 +833,43 @@ def check_master_room_list_space_type_table_match(sim_text: str, workbook_path: 
     """Compare LV-B spaces against existing Master Room List Space Type Table values."""
     lv_b_result = extract_lv_b_spaces(sim_text)
     expected_spaces = list(lv_b_result["spaces"].items())[:MASTER_ROOM_LIST_SPACE_MAX_ROWS]
+    if load_workbook is not None:
+        workbook = load_workbook(workbook_path, keep_vba=True, data_only=True)
+        sheet = workbook["Master Room List"]
+        mismatches: List[Dict[str, object]] = []
+        compared_rows = 0
+        for index in range(MASTER_ROOM_LIST_SPACE_MAX_ROWS):
+            row_number = MASTER_ROOM_LIST_SPACE_START_ROW + index
+            existing_name = sheet[f"D{row_number}"].value
+            existing_area = sheet[f"G{row_number}"].value
+            existing_name = str(existing_name).strip() if existing_name is not None else ""
+            existing_area = float(existing_area) if existing_area is not None else None
+            if index < len(expected_spaces):
+                expected_name, expected_space_data = expected_spaces[index]
+                expected_area = float(expected_space_data["area_sqft"])
+                compared_rows += 1
+                name_matches = existing_name == expected_name
+                area_matches = existing_area is not None and abs(existing_area - expected_area) < 1e-6
+                if not (name_matches and area_matches):
+                    mismatches.append(
+                        {
+                            "row": row_number,
+                            "expected_space_name": expected_name,
+                            "existing_space_name": existing_name,
+                            "expected_area_sqft": expected_area,
+                            "existing_area_sqft": existing_area,
+                        }
+                    )
+        return {
+            "target_sheet": "Master Room List",
+            "target_table": "Space Type Table",
+            "writer": "openpyxl",
+            "rows_checked": compared_rows,
+            "spaces_compared": len(expected_spaces),
+            "space_type_table_match": len(mismatches) == 0,
+            "mismatch_count": len(mismatches),
+            "mismatches": mismatches,
+        }
     sheet_root = _load_master_room_list_sheet(workbook_path)
     sheet_data = sheet_root.find("m:sheetData", NS)
     if sheet_data is None:
@@ -1005,8 +1130,16 @@ def main() -> None:
         type=Path,
         help="Path to workbook .xlsm where ECM Data should be populated from BEPS/ES-D.",
     )
+    parser.add_argument(
+        "--list-reports",
+        action="store_true",
+        help="List discovered REPORT-* sections in the SIM file and exit.",
+    )
     args = parser.parse_args()
     sim_text = args.sim_file.read_text(errors="ignore")
+    if args.list_reports:
+        print(json.dumps(detect_available_reports(sim_text), indent=args.indent))
+        return
     if args.update_ecm_data:
         if not args.output_workbook:
             raise ValueError("--output-workbook is required when using --update-ecm-data.")
