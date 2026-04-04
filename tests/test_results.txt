@@ -1,8 +1,18 @@
-(.venv) PS A:\Users\kyleg\PycharmProjects\eQuest-Simulation-Extraction> powershell -ExecutionPolicy Bypass -File .\local_test_sequence.ps1
+A:\Users\kyleg\PycharmProjects\eQuest-Simulation-Extraction\.venv\Scripts\python.exe A:\Users\kyleg\PycharmProjects\eQuest-Simulation-Extraction\local_test_sequence.py 
 Python 3.13.9
-usage: equest_extractor.py [-h] [--report {beps,lv-b,lv-d,lv-i,ls-a,lv-m,es-d,ps-h,all}] [--indent INDENT] [--populate-master-room-list POPULATE_MASTER_ROOM_LIST] [--output-workbook OUTPUT_WORKBOOK] [--model-run-type MODEL_RUN_TYPE] [--update-ecm-data UPDATE_ECM_DATA] sim_file
 
-Extract BEPS, LV-B, LV-D, LV-I, LS-A, LV-M, ES-D, and PS-H report data from an eQuest SIM file.
+usage: equest_extractor.py [-h]
+                           [--report {beps,lv-b,lv-d,lv-i,ls-a,lv-m,es-d,ps-h,all}]
+                           [--indent INDENT]
+                           [--populate-master-room-list POPULATE_MASTER_ROOM_LIST]
+                           [--output-workbook OUTPUT_WORKBOOK]
+                           [--model-run-type MODEL_RUN_TYPE]
+                           [--update-ecm-data UPDATE_ECM_DATA]
+                           [--list-reports]
+                           sim_file
+
+Extract BEPS, LV-B, LV-D, LV-I, LS-A, LV-M, ES-D, and PS-H report data from an
+eQuest SIM file.
 
 positional arguments:
   sim_file              Path to the eQuest .SIM file
@@ -13,13 +23,20 @@ options:
                         Which report(s) to extract (default: all)
   --indent INDENT       JSON indentation level for output (default: 2)
   --populate-master-room-list POPULATE_MASTER_ROOM_LIST
-                        Path to Building Performance Assumptions .xlsm used for Space Type Table actions.
+                        Path to Building Performance Assumptions .xlsm used
+                        for Space Type Table actions.
   --output-workbook OUTPUT_WORKBOOK
-                        Output path for updated workbook (required for Baseline writes).
+                        Output path for updated workbook (required for
+                        Baseline writes).
   --model-run-type MODEL_RUN_TYPE
-                        Model run type from automation input (e.g., Baseline, Proposed, ECM-1).
+                        Model run type from automation input (e.g., Baseline,
+                        Proposed, ECM-1).
   --update-ecm-data UPDATE_ECM_DATA
-                        Path to workbook .xlsm where ECM Data should be populated from BEPS/ES-D.
+                        Path to workbook .xlsm where ECM Data should be
+                        populated from BEPS/ES-D.
+  --list-reports        List discovered REPORT-* sections in the SIM file and
+                        exit.
+
 {
   "report": "BEPS",
   "columns": [
@@ -154,9 +171,11 @@ options:
     }
   }
 }
+
 {
   "target_sheet": "Master Room List",
   "target_table": "Space Type Table",
+  "writer": "openpyxl",
   "rows_available": 50,
   "spaces_found": 172,
   "spaces_written": 50,
@@ -166,8 +185,10 @@ options:
   "is_baseline": true,
   "space_type_table_match": true
 }
+
 {
   "sheet": "ECM Data",
+  "writer": "openpyxl",
   "model_run_type": "ECM-1",
   "section_start_row": 44,
   "end_use_columns_written": [
@@ -203,6 +224,9 @@ options:
   "total_cost": 167308.53083235642,
   "output_workbook": "A:\\Users\\kyleg\\PycharmProjects\\eQuest-Simulation-Extraction\\output_files\\Building Performance Assumptions.ecm.updated.xlsm"
 }
+
 Done. Output files:
 A:\Users\kyleg\PycharmProjects\eQuest-Simulation-Extraction\output_files\Building Performance Assumptions.master_room.updated.xlsm
 A:\Users\kyleg\PycharmProjects\eQuest-Simulation-Extraction\output_files\Building Performance Assumptions.ecm.updated.xlsm
+
+Process finished with exit code 0
