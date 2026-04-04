@@ -20,15 +20,140 @@ options:
                         Model run type from automation input (e.g., Baseline, Proposed, ECM-1).
   --update-ecm-data UPDATE_ECM_DATA
                         Path to workbook .xlsm where ECM Data should be populated from BEPS/ES-D.
-Traceback (most recent call last):
-  File "A:\Users\kyleg\PycharmProjects\eQuest-Simulation-Extraction\equest_extractor.py", line 1084, in <module>
-    main()
-    ~~~~^^
-  File "A:\Users\kyleg\PycharmProjects\eQuest-Simulation-Extraction\equest_extractor.py", line 1054, in main
-    result = extract_beps_report(sim_text)
-  File "A:\Users\kyleg\PycharmProjects\eQuest-Simulation-Extraction\equest_extractor.py", line 129, in extract_beps_report
-    raise ValueError("Could not find 'REPORT- BEPS' in the SIM file.")
-ValueError: Could not find 'REPORT- BEPS' in the SIM file.
+{
+  "report": "BEPS",
+  "columns": [
+    "LIGHTS",
+    "TASK LIGHTS",
+    "MISC EQUIP",
+    "SPACE HEATING",
+    "SPACE COOLING",
+    "HEAT REJECT",
+    "PUMPS & AUX",
+    "VENT FANS",
+    "REFRIG DISPLAY",
+    "HT PUMP SUPPLEM",
+    "DOMEST HOT WTR",
+    "EXT USAGE",
+    "TOTAL"
+  ],
+  "rows": {
+    "COMM ELECTRICITY": {
+      "fuel_type": "electricity",
+      "unit": "MBTU",
+      "values": {
+        "LIGHTS": 0.0,
+        "TASK LIGHTS": 0.0,
+        "MISC EQUIP": 51.6,
+        "SPACE HEATING": 0.0,
+        "SPACE COOLING": 0.0,
+        "HEAT REJECT": 0.0,
+        "PUMPS & AUX": 43.3,
+        "VENT FANS": 0.0,
+        "REFRIG DISPLAY": 0.0,
+        "HT PUMP SUPPLEM": 0.0,
+        "DOMEST HOT WTR": 0.0,
+        "EXT USAGE": 10.9,
+        "TOTAL": 105.8
+      }
+    },
+    "EM1 ELECTRICITY": {
+      "fuel_type": "electricity",
+      "unit": "MBTU",
+      "values": {
+        "LIGHTS": 436.7,
+        "TASK LIGHTS": 263.7,
+        "MISC EQUIP": 592.0,
+        "SPACE HEATING": 0.0,
+        "SPACE COOLING": 316.6,
+        "HEAT REJECT": 0.0,
+        "PUMPS & AUX": 52.1,
+        "VENT FANS": 405.8,
+        "REFRIG DISPLAY": 0.0,
+        "HT PUMP SUPPLEM": 0.0,
+        "DOMEST HOT WTR": 0.0,
+        "EXT USAGE": 0.0,
+        "TOTAL": 2066.9
+      }
+    },
+    "COMM NATURAL-GAS": {
+      "fuel_type": "natural_gas",
+      "unit": "MBTU",
+      "values": {
+        "LIGHTS": 0.0,
+        "TASK LIGHTS": 0.0,
+        "MISC EQUIP": 0.0,
+        "SPACE HEATING": 0.0,
+        "SPACE COOLING": 0.0,
+        "HEAT REJECT": 0.0,
+        "PUMPS & AUX": 0.0,
+        "VENT FANS": 0.0,
+        "REFRIG DISPLAY": 0.0,
+        "HT PUMP SUPPLEM": 0.0,
+        "DOMEST HOT WTR": 0.0,
+        "EXT USAGE": 0.0,
+        "TOTAL": 0.0
+      }
+    },
+    "FM1 NATURAL-GAS": {
+      "fuel_type": "natural_gas",
+      "unit": "MBTU",
+      "values": {
+        "LIGHTS": 0.0,
+        "TASK LIGHTS": 0.0,
+        "MISC EQUIP": 0.0,
+        "SPACE HEATING": 2702.0,
+        "SPACE COOLING": 0.0,
+        "HEAT REJECT": 0.0,
+        "PUMPS & AUX": 0.0,
+        "VENT FANS": 0.0,
+        "REFRIG DISPLAY": 0.0,
+        "HT PUMP SUPPLEM": 0.0,
+        "DOMEST HOT WTR": 2389.0,
+        "EXT USAGE": 0.0,
+        "TOTAL": 5091.0
+      }
+    }
+  },
+  "totals_by_fuel": {
+    "electricity": {
+      "unit": "MBTU",
+      "by_end_use": {
+        "LIGHTS": 436.7,
+        "TASK LIGHTS": 263.7,
+        "MISC EQUIP": 643.6,
+        "SPACE HEATING": 0.0,
+        "SPACE COOLING": 316.6,
+        "HEAT REJECT": 0.0,
+        "PUMPS & AUX": 95.4,
+        "VENT FANS": 405.8,
+        "REFRIG DISPLAY": 0.0,
+        "HT PUMP SUPPLEM": 0.0,
+        "DOMEST HOT WTR": 0.0,
+        "EXT USAGE": 10.9,
+        "TOTAL": 2172.7000000000003
+      }
+    },
+    "natural_gas": {
+      "unit": "MBTU",
+      "by_end_use": {
+        "LIGHTS": 0.0,
+        "TASK LIGHTS": 0.0,
+        "MISC EQUIP": 0.0,
+        "SPACE HEATING": 2702.0,
+        "SPACE COOLING": 0.0,
+        "HEAT REJECT": 0.0,
+        "PUMPS & AUX": 0.0,
+        "VENT FANS": 0.0,
+        "REFRIG DISPLAY": 0.0,
+        "HT PUMP SUPPLEM": 0.0,
+        "DOMEST HOT WTR": 2389.0,
+        "EXT USAGE": 0.0,
+        "TOTAL": 5091.0
+      }
+    }
+  }
+}
 {
   "target_sheet": "Master Room List",
   "target_table": "Space Type Table",
@@ -41,21 +166,43 @@ ValueError: Could not find 'REPORT- BEPS' in the SIM file.
   "is_baseline": true,
   "space_type_table_match": true
 }
-Traceback (most recent call last):
-  File "A:\Users\kyleg\PycharmProjects\eQuest-Simulation-Extraction\equest_extractor.py", line 1084, in <module>
-    main()
-    ~~~~^^
-  File "A:\Users\kyleg\PycharmProjects\eQuest-Simulation-Extraction\equest_extractor.py", line 1014, in main
-    result = populate_ecm_data_from_reports(
-        sim_text=sim_text,
-    ...<2 lines>...
-        output_workbook_path=args.output_workbook,
-    )
-  File "A:\Users\kyleg\PycharmProjects\eQuest-Simulation-Extraction\equest_extractor.py", line 651, in populate_ecm_data_from_reports
-    beps_result = extract_beps_report(sim_text)
-  File "A:\Users\kyleg\PycharmProjects\eQuest-Simulation-Extraction\equest_extractor.py", line 129, in extract_beps_report
-    raise ValueError("Could not find 'REPORT- BEPS' in the SIM file.")
-ValueError: Could not find 'REPORT- BEPS' in the SIM file.
+{
+  "sheet": "ECM Data",
+  "model_run_type": "ECM-1",
+  "section_start_row": 44,
+  "end_use_columns_written": [
+    "B",
+    "C",
+    "D",
+    "E",
+    "F",
+    "H",
+    "J",
+    "K",
+    "L",
+    "M",
+    "Q"
+  ],
+  "left_blank_columns": [
+    "G",
+    "I",
+    "N",
+    "O",
+    "P",
+    "R",
+    "S",
+    "T"
+  ],
+  "total_electric_kbtu": 2172700.0000000005,
+  "total_gas_kbtu": 5091000.0,
+  "total_energy_kbtu": 7263700.0,
+  "elec_virtual_rate_per_kbtu": 0.04982415005861665,
+  "gas_virtual_rate_per_kbtu": 0.0116,
+  "elec_cost": 108252.93083235642,
+  "gas_cost": 59055.6,
+  "total_cost": 167308.53083235642,
+  "output_workbook": "A:\\Users\\kyleg\\PycharmProjects\\eQuest-Simulation-Extraction\\output_files\\Building Performance Assumptions.ecm.updated.xlsm"
+}
 Done. Output files:
 A:\Users\kyleg\PycharmProjects\eQuest-Simulation-Extraction\output_files\Building Performance Assumptions.master_room.updated.xlsm
 A:\Users\kyleg\PycharmProjects\eQuest-Simulation-Extraction\output_files\Building Performance Assumptions.ecm.updated.xlsm
