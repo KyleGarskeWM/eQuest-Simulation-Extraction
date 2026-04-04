@@ -2,6 +2,7 @@
 """Extract BEPS, LV-B, LV-D, LV-I, LS-A, LV-M, ES-D, and PS-H report data from an eQuest .SIM file."""
 from __future__ import annotations
 import argparse
+import io
 import json
 import os
 import re
@@ -534,6 +535,13 @@ def _save_zip_file_map(file_map: Dict[str, bytes], output_workbook_path: Path) -
             dst_zip.writestr(name, payload)
 
 
+def _parse_xml_with_registered_namespaces(xml_payload: bytes) -> ET.Element:
+    for _, ns in ET.iterparse(io.BytesIO(xml_payload), events=("start-ns",)):
+        prefix, uri = ns
+        ET.register_namespace(prefix or "", uri)
+    return ET.fromstring(xml_payload)
+
+
 def _to_kbtu(value: float, from_unit: str) -> float:
     normalized_unit = from_unit.upper().strip()
     if normalized_unit not in KBTU_PER_UNIT:
@@ -547,7 +555,7 @@ def _load_master_room_list_sheet(workbook_path: Path) -> ET.Element:
             sheet_xml = workbook_zip.read(MASTER_ROOM_LIST_SHEET_XML_PATH)
         except KeyError as exc:
             raise ValueError("Could not find Master Room List worksheet XML in the workbook.") from exc
-    return ET.fromstring(sheet_xml)
+    return _parse_xml_with_registered_namespaces(sheet_xml)
 
 
 def _read_cell_text(row: ET.Element, cell_ref: str) -> str:
@@ -588,7 +596,7 @@ def populate_master_room_list_space_type_table(
     file_map = _load_zip_file_map(workbook_path)
     if MASTER_ROOM_LIST_SHEET_XML_PATH not in file_map:
         raise ValueError("Could not find Master Room List worksheet XML in the workbook.")
-    sheet_root = ET.fromstring(file_map[MASTER_ROOM_LIST_SHEET_XML_PATH])
+    sheet_root = _parse_xml_with_registered_namespaces(file_map[MASTER_ROOM_LIST_SHEET_XML_PATH])
     sheet_data = sheet_root.find("m:sheetData", NS)
     if sheet_data is None:
         raise ValueError("Workbook sheet is missing sheetData.")
@@ -685,7 +693,7 @@ def populate_ecm_data_from_reports(
     file_map = _load_zip_file_map(workbook_path)
     if ECM_DATA_SHEET_XML_PATH not in file_map:
         raise ValueError("Could not find ECM Data worksheet XML in workbook.")
-    sheet_root = ET.fromstring(file_map[ECM_DATA_SHEET_XML_PATH])
+    sheet_root = _parse_xml_with_registered_namespaces(file_map[ECM_DATA_SHEET_XML_PATH])
     sheet_data = sheet_root.find("m:sheetData", NS)
     if sheet_data is None:
         raise ValueError("ECM Data sheet is missing sheetData.")
