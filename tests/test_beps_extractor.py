@@ -1,7 +1,13 @@
+import os
+import tempfile
 import unittest
+import xml.etree.ElementTree as ET
+import zipfile
 from pathlib import Path
 
+from run_local import build_command
 from equest_extractor import (
+    check_master_room_list_space_type_table_match,
     convert_value,
     extract_beps_report,
     extract_ls_a_peak_loads,
@@ -9,12 +15,42 @@ from equest_extractor import (
     extract_lv_d_report,
     extract_lv_i_constructions,
     extract_lv_m_conversions,
+    populate_master_room_list_space_type_table,
+    populate_ecm_data_from_reports,
+    resolve_model_run_type,
     extract_es_d_energy_cost_summary,
     extract_ps_h_details,
 )
 
 
 class TestBepsExtractor(unittest.TestCase):
+    def test_run_local_build_command_modes(self):
+        extract_command = build_command({"sim_file": "a.sim", "mode": "extract_report", "report": "beps"})
+        self.assertIn("--report", extract_command)
+        self.assertIn("beps", extract_command)
+
+        mrl_command = build_command(
+            {
+                "sim_file": "a.sim",
+                "mode": "master_room_list",
+                "workbook_path": "b.xlsm",
+                "output_workbook_path": "c.xlsm",
+                "model_run_type": "Baseline",
+            }
+        )
+        self.assertIn("--populate-master-room-list", mrl_command)
+
+        ecm_command = build_command(
+            {
+                "sim_file": "a.sim",
+                "mode": "ecm_data",
+                "workbook_path": "b.xlsm",
+                "output_workbook_path": "c.xlsm",
+                "model_run_type": "ECM-1",
+            }
+        )
+        self.assertIn("--update-ecm-data", ecm_command)
+
     def test_extracts_all_beps_columns_and_totals_by_fuel(self):
         sim_text = """
         REPORT- BEPS Building Energy Performance
@@ -129,6 +165,128 @@ class TestBepsExtractor(unittest.TestCase):
         self.assertEqual(result["pumps"]["HW Loop Pump"]["capacity_control"], "ONE-SPEED")
         self.assertEqual(result["equipment"]["HW Boiler 1"]["capacity"], -0.92)
         self.assertEqual(result["equipment"]["HW Boiler 1"]["heat_hir"], 1.3333)
+
+    def test_populates_master_room_list_space_type_table(self):
+        sim_path = Path("St Anselm Baseline ABS_Rev_0 - Baseline Design.SIM")
+        workbook_path = Path("Building Performance Assumptions.xlsm")
+        sim_text = sim_path.read_text(errors="ignore")
+        lv_b_result = extract_lv_b_spaces(sim_text)
+        first_space_name, first_space_data = next(iter(lv_b_result["spaces"].items()))
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "Building Performance Assumptions.updated.xlsm"
+            result = populate_master_room_list_space_type_table(
+                sim_text=sim_text,
+                workbook_path=workbook_path,
+                output_workbook_path=output_path,
+            )
+            self.assertEqual(result["spaces_written"], 50)
+            with zipfile.ZipFile(output_path, "r") as workbook_zip:
+                sheet_payload = workbook_zip.read("xl/worksheets/sheet1.xml")
+                sheet = ET.fromstring(sheet_payload)
+            ns = {"m": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+            d16 = sheet.find(".//m:c[@r='D16']", ns)
+            g16 = sheet.find(".//m:c[@r='G16']/m:v", ns)
+            self.assertIsNotNone(d16)
+            self.assertEqual(d16.attrib.get("t"), "inlineStr")
+            d16_text = "".join(node.text or "" for node in d16.iter("{http://schemas.openxmlformats.org/spreadsheetml/2006/main}t"))
+            self.assertEqual(d16_text, first_space_name)
+            self.assertIsNotNone(g16)
+            self.assertAlmostEqual(float(g16.text), float(first_space_data["area_sqft"]))
+            d66 = sheet.find(".//m:c[@r='D66']", ns)
+            if d66 is not None:
+                d66_text = "".join(node.text or "" for node in d66.iter("{http://schemas.openxmlformats.org/spreadsheetml/2006/main}t"))
+                self.assertEqual(d66_text, "")
+            # Ensure core compatibility namespace metadata is preserved to avoid Excel repair/recovery.
+            self.assertIn(b"xmlns:mc=", sheet_payload)
+            self.assertIn(b"mc:Ignorable=", sheet_payload)
+
+    def test_non_baseline_comparison_returns_true_when_matching(self):
+        sim_text = Path("St Anselm Baseline ABS_Rev_0 - Baseline Design.SIM").read_text(errors="ignore")
+        workbook_path = Path("Building Performance Assumptions.xlsm")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            populated_path = Path(temp_dir) / "baseline_populated.xlsm"
+            populate_master_room_list_space_type_table(
+                sim_text=sim_text,
+                workbook_path=workbook_path,
+                output_workbook_path=populated_path,
+            )
+            comparison = check_master_room_list_space_type_table_match(
+                sim_text=sim_text,
+                workbook_path=populated_path,
+            )
+            self.assertTrue(comparison["space_type_table_match"])
+            self.assertEqual(comparison["mismatch_count"], 0)
+
+    def test_non_baseline_comparison_returns_false_when_different(self):
+        sim_text = Path("St Anselm Baseline ABS_Rev_0 - Baseline Design.SIM").read_text(errors="ignore")
+        workbook_path = Path("Building Performance Assumptions.xlsm")
+        lv_b_result = extract_lv_b_spaces(sim_text)
+        first_space_name, first_space_data = next(iter(lv_b_result["spaces"].items()))
+        mutated_sim_text = f"""
+        REPORT- LV-B Summary of Spaces
+        Spaces on floor: Level 1
+        {first_space_name} Changed                     1.0   INT   89.4    0.80    1.0    0.50   AIR-CHANGE  0.10      {first_space_data["area_sqft"]:.1f}      12457.7
+        CONDITIONED FLOOR AREA          =     107479.2  SQFT
+        REPORT- LS-A
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            populated_path = Path(temp_dir) / "baseline_populated.xlsm"
+            populate_master_room_list_space_type_table(
+                sim_text=sim_text,
+                workbook_path=workbook_path,
+                output_workbook_path=populated_path,
+            )
+            comparison = check_master_room_list_space_type_table_match(
+                sim_text=mutated_sim_text,
+                workbook_path=populated_path,
+            )
+            self.assertFalse(comparison["space_type_table_match"])
+            self.assertGreater(comparison["mismatch_count"], 0)
+
+    def test_resolve_model_run_type_precedence(self):
+        self.assertEqual(resolve_model_run_type("ECM-2"), "ECM-2")
+        old_value = os.environ.get("MODEL_RUN_TYPE")
+        try:
+            os.environ["MODEL_RUN_TYPE"] = "Proposed"
+            self.assertEqual(resolve_model_run_type(None), "Proposed")
+            os.environ["MODEL_RUN_TYPE"] = ""
+            self.assertEqual(resolve_model_run_type(None), "Baseline")
+        finally:
+            if old_value is None:
+                os.environ.pop("MODEL_RUN_TYPE", None)
+            else:
+                os.environ["MODEL_RUN_TYPE"] = old_value
+
+    def test_populate_ecm_data_from_reports_for_ecm1(self):
+        sim_text = Path("St Anselm Baseline ABS_Rev_0 - Baseline Design.SIM").read_text(errors="ignore")
+        workbook_path = Path("Building Performance Assumptions.xlsm")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "ecm_updated.xlsm"
+            result = populate_ecm_data_from_reports(
+                sim_text=sim_text,
+                workbook_path=workbook_path,
+                model_run_type="ECM-1",
+                output_workbook_path=output_path,
+            )
+            self.assertEqual(result["section_start_row"], 44)
+            self.assertEqual(result["left_blank_columns"], ["G", "I", "N", "O", "P", "R", "S", "T"])
+            self.assertGreater(result["total_electric_kbtu"], 0)
+            self.assertGreater(result["total_gas_kbtu"], 0)
+            with zipfile.ZipFile(output_path, "r") as workbook_zip:
+                sheet = ET.fromstring(workbook_zip.read("xl/worksheets/sheet10.xml"))
+            ns = {"m": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+            total_elec_cell = sheet.find(".//m:c[@r='B50']/m:v", ns)
+            total_gas_cell = sheet.find(".//m:c[@r='B51']/m:v", ns)
+            demand_cell = sheet.find(".//m:c[@r='B49']/m:v", ns)
+            self.assertIsNotNone(total_elec_cell)
+            self.assertIsNotNone(total_gas_cell)
+            self.assertAlmostEqual(float(total_elec_cell.text), result["total_electric_kbtu"], places=3)
+            self.assertAlmostEqual(float(total_gas_cell.text), result["total_gas_kbtu"], places=3)
+            # Demand row should be blanked.
+            self.assertIsNone(demand_cell)
+            # Unmapped ECM columns should remain blank in the Energy Use row.
+            for col in ["G", "I", "N", "O", "P", "R", "S", "T"]:
+                self.assertIsNone(sheet.find(f".//m:c[@r='{col}48']/m:v", ns))
 
 
 if __name__ == "__main__":
