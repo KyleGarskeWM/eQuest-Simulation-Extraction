@@ -1,0 +1,8 @@
+{
+  "mode": "master_room_list",
+  "sim_file": "A:\\Users\\kyleg\\PycharmProjects\\eQuest-Simulation-Extraction\\sample_data\\St Anselm Baseline ABS_Rev_0 - Baseline Design.SIM",
+  "workbook_path": "A:\\Users\\kyleg\\PycharmProjects\\eQuest-Simulation-Extraction\\output_files\\Building Performance Assumptions.xlsm",
+  "output_workbook_path": "A:\\Users\\kyleg\\PycharmProjects\\eQuest-Simulation-Extraction\\output_files\\Building Performance Assumptions.updated.xlsm",
+  "model_run_type": "Baseline",
+  "report": "all"
+}
