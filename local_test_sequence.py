@@ -10,7 +10,7 @@ REPO_PATH = Path(r"A:\Users\kyleg\PycharmProjects\eQuest-Simulation-Extraction")
 SIM_PATH = REPO_PATH / r"sample_data\St Anselm Baseline ABS_Rev_0 - Baseline Design.SIM"
 WORKBOOK_PATH = REPO_PATH / r"output_files\Building Performance Assumptions.xlsm"
 MASTER_ROOM_OUT = REPO_PATH / r"output_files\Building Performance Assumptions.master_room.updated.xlsm"
-ECM_OUT = REPO_PATH / r"output_files\Building Performance Assumptions.ecm.updated.xlsm"
+ECM_OUT = REPO_PATH / r"output_files\Building Performance Assumptions.combined.updated.xlsm"
 
 
 def run_checked(args: list[str]) -> None:
@@ -56,7 +56,7 @@ def main() -> None:
                 "equest_extractor.py",
                 str(SIM_PATH),
                 "--update-ecm-data",
-                str(WORKBOOK_PATH),
+                str(MASTER_ROOM_OUT),
                 "--model-run-type",
                 "ECM-1",
                 "--output-workbook",
