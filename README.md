@@ -6,7 +6,9 @@ This repository includes a Python utility (`equest_extractor.py`) to extract **B
 ## Requirements
 
 - Python 3.9+ (Anaconda Python is fine)
-- No third-party Python packages are required for `equest_extractor.py` (it uses standard library modules only).
+- Recommended: `openpyxl` for safest `.xlsm` read/write behavior.
+  - `pip install openpyxl`
+- Without `openpyxl`, the tool falls back to XML-level editing.
 
 ## 2-minute sanity check
 
@@ -15,6 +17,7 @@ Run these commands in order to verify your environment before PAD:
 ```bash
 python --version
 python equest_extractor.py --help
+python equest_extractor.py "<SIM_PATH>" --list-reports
 python equest_extractor.py "<SIM_PATH>" --report beps
 python equest_extractor.py "<SIM_PATH>" --populate-master-room-list "<XLSM_PATH>" --model-run-type Baseline --output-workbook "<OUTPUT_XLSM_PATH>"
 python equest_extractor.py "<SIM_PATH>" --update-ecm-data "<XLSM_PATH>" --model-run-type ECM-1 --output-workbook "<OUTPUT_XLSM_PATH>"
@@ -22,6 +25,7 @@ python equest_extractor.py "<SIM_PATH>" --update-ecm-data "<XLSM_PATH>" --model-
 
 Expected quick checks:
 - `--help` prints usage
+- `--list-reports` shows what REPORT sections actually exist in the SIM
 - `--report beps` prints JSON
 - workbook commands print JSON and produce/update output `.xlsm`
 
@@ -49,6 +53,20 @@ If you want to test locally in PyCharm first, use a config-driven runner:
 - `report`: report name if `mode` is `extract_report` (for example `beps`, `all`)
 
 This gives you variables you can change now in one file and later replace with user-driven inputs from UI/automation.
+
+For a one-shot local verification with exact Windows paths, use:
+- `local_test_sequence.ps1`
+
+Run it from PowerShell (not Python):
+```powershell
+powershell -ExecutionPolicy Bypass -File .\local_test_sequence.ps1
+```
+
+If you run a `.ps1` file with `python ...`, you can get errors like `Unknown option: -F`.
+
+`local_test_sequence.ps1` now checks whether the SIM contains `REPORT- BEPS`:
+- if present: runs BEPS check + ECM update
+- if missing: skips BEPS/ECM steps and still runs Master Room List population
 
 It also supports Power Automate-style workbook actions against **Master Room List → Space Type Table** in `Building Performance Assumptions.xlsm` using `--model-run-type`:
 - `Baseline`: writes LV-B space names and areas into the table.
