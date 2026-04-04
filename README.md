@@ -56,17 +56,37 @@ This gives you variables you can change now in one file and later replace with u
 
 For a one-shot local verification with exact Windows paths, use:
 - `local_test_sequence.ps1`
+- `local_test_sequence.py` (recommended if shell command resolution is flaky)
 
 Run it from PowerShell (not Python):
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\local_test_sequence.ps1
 ```
 
+If you're **already inside a PowerShell prompt**, just run:
+```powershell
+.\local_test_sequence.ps1
+```
+
+If `powershell` is not recognized, try one of:
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File .\local_test_sequence.ps1
+pwsh -ExecutionPolicy Bypass -File .\local_test_sequence.ps1
+```
+
 If you run a `.ps1` file with `python ...`, you can get errors like `Unknown option: -F`.
+
+Shell-agnostic fallback (recommended if you hit PowerShell command issues):
+```bash
+python local_test_sequence.py
+```
 
 `local_test_sequence.ps1` now checks whether the SIM contains `REPORT- BEPS`:
 - if present: runs BEPS check + ECM update
 - if missing: skips BEPS/ECM steps and still runs Master Room List population
+
+Both local test sequence scripts now chain updates so ECM write uses the Master Room output as input, producing a single combined workbook:
+- `Building Performance Assumptions.combined.updated.xlsm`
 
 It also supports Power Automate-style workbook actions against **Master Room List → Space Type Table** in `Building Performance Assumptions.xlsm` using `--model-run-type`:
 - `Baseline`: writes LV-B space names and areas into the table.
