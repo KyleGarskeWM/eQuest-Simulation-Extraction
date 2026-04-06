@@ -143,362 +143,7 @@ def _parse_values_line(line: str) -> tuple[str, List[float]]:
             f"Expected {len(END_USE_COLUMNS)} numeric BEPS columns but found {len(numbers)} in line: {line!r}"
         )
     return unit, numbers
-
-
-def detect_available_reports(sim_text: str) -> Dict[str, object]:
-    """Return discovered REPORT-* identifiers from a SIM file."""
-    discovered = []
-    seen = set()
-    for line in sim_text.splitlines():
-        match = REPORT_HEADER_PATTERN.search(line)
-        if not match:
-            continue
-        report_id = match.group(1).upper()
-        if report_id in seen:
-            continue
-        seen.add(report_id)
-        discovered.append(report_id)
-    return {
-        "available_reports": discovered,
-        "has_beps": "BEPS" in seen,
-        "has_lv_b": "LV-B" in seen,
-        "has_es_d": "ES-D" in seen,
-    }
-def extract_beps_report(sim_text: str) -> Dict[str, object]:
-    """Parse BEPS and return electricity/natural-gas totals for each end-use column."""
-    lines = sim_text.splitlines()
-    report_start = next((i for i, line in enumerate(lines) if "REPORT- BEPS" in line.upper()), None)
-    if report_start is None:
-        raise ValueError(
-            "Could not find 'REPORT- BEPS' in the SIM file. "
-            "The SIM may be truncated/cut off before BEPS; run with '--list-reports' to verify report availability."
-        )
-    section_lines = lines[report_start : report_start + 300]
-    rows: Dict[str, Dict[str, object]] = {}
-    idx = 0
-    while idx < len(section_lines):
-        line = section_lines[idx].strip()
-        upper = line.upper()
-        if upper.startswith("REPORT-") and idx > 0:
-            break
-        is_electric = "ELECTRICITY" in upper
-        is_gas = "NATURAL-GAS" in upper or "NATURAL GAS" in upper
-        if not (is_electric or is_gas):
-            idx += 1
-            continue
-        row_name = " ".join(line.split())
-        j = idx + 1
-        while j < len(section_lines) and not section_lines[j].strip():
-            j += 1
-        if j >= len(section_lines):
-            raise ValueError(f"Missing values line for BEPS row '{row_name}'.")
-        unit, values = _parse_values_line(section_lines[j])
-        rows[row_name] = {
-            "fuel_type": "electricity" if is_electric else "natural_gas",
-            "unit": unit,
-            "values": dict(zip(END_USE_COLUMNS, values)),
-        }
-        idx = j + 1
-    if not rows:
-        raise ValueError("No electricity or natural-gas rows were parsed from BEPS.")
-    totals = {
-        "electricity": {col: 0.0 for col in END_USE_COLUMNS},
-        "natural_gas": {col: 0.0 for col in END_USE_COLUMNS},
-    }
-    units = {"electricity": None, "natural_gas": None}
-    for row in rows.values():
-        fuel_type = row["fuel_type"]
-        row_unit = row["unit"]
-        if units[fuel_type] is None:
-            units[fuel_type] = row_unit
-        elif units[fuel_type] != row_unit:
-            raise ValueError(
-                f"Inconsistent units for {fuel_type}: saw both '{units[fuel_type]}' and '{row_unit}'."
-            )
-        for col, value in row["values"].items():
-            totals[fuel_type][col] += value
-    return {
-        "report": "BEPS",
-        "columns": END_USE_COLUMNS,
-        "rows": rows,
-        "totals_by_fuel": {
-            "electricity": {"unit": units["electricity"], "by_end_use": totals["electricity"]},
-            "natural_gas": {"unit": units["natural_gas"], "by_end_use": totals["natural_gas"]},
-        },
-    }
-def extract_lv_b_spaces(sim_text: str) -> Dict[str, object]:
-    """Extract unique LV-B spaces, grouping label, requested attributes, and conditioned floor area."""
-    lines = sim_text.splitlines()
-    in_lvb = False
-    current_group = None
-    spaces: Dict[str, Dict[str, object]] = {}
-    for raw_line in lines:
-        stripped = raw_line.strip()
-        upper = stripped.upper()
-        if "REPORT- LV-B" in upper:
-            in_lvb = True
-            continue
-        if in_lvb and upper.startswith("REPORT-") and "REPORT- LV-B" not in upper:
-            in_lvb = False
-        if not in_lvb:
-            continue
-        if upper.startswith("SPACES ON FLOOR:"):
-            current_group = stripped
-            continue
-        if (
-            not stripped
-            or upper.startswith("NUMBER OF SPACES")
-            or "SPACE*FLOOR" in upper
-            or upper.startswith("BUILDING TOTALS")
-            or "SPACE" == upper
-            or set(stripped) <= {"-", "=", "+"}
-        ):
-            continue
-        parts = [part.strip() for part in re.split(r"\s{2,}", raw_line.strip()) if part.strip()]
-        if len(parts) < 11:
-            continue
-        space_name = parts[0]
-        _space_floor_multiplier = parts[1]
-        space_type = parts[2]
-        _azimuth = parts[3]
-        lights = parts[4]
-        people = parts[5]
-        equip = parts[6]
-        infiltration_method = parts[7]
-        ach = parts[8]
-        area_sqft = parts[9]
-        volume_cuft = parts[10]
-        if space_type not in {"INT", "EXT"}:
-            continue
-        try:
-            float(_space_floor_multiplier)
-            float(_azimuth)
-            float(lights)
-            float(people)
-            float(equip)
-            float(ach)
-            float(area_sqft)
-            float(volume_cuft)
-        except ValueError:
-            continue
-        normalized_name = " ".join(space_name.split())
-        if normalized_name in spaces:
-            continue
-        spaces[normalized_name] = {
-            "group": current_group,
-            "space_type": space_type,
-            "lights_w_per_sqft": float(lights),
-            "people": float(people),
-            "equip_w_per_sqft": float(equip),
-            "infiltration_method": infiltration_method,
-            "ach": float(ach),
-            "area_sqft": float(area_sqft),
-            "volume_cuft": float(volume_cuft),
-            "units": {
-                "lights": "WATT/SQFT",
-                "equip": "WATT/SQFT",
-                "area": "SQFT",
-                "volume": "CUFT",
-                "ach": "ACH",
-            },
-        }
-    if not spaces:
-        raise ValueError("Could not parse any LV-B space rows from the SIM file.")
-    conditioned_floor_area_match = CONDITIONED_FLOOR_AREA_PATTERN.search(sim_text)
-    conditioned_floor_area = None
-    if conditioned_floor_area_match:
-        conditioned_floor_area = float(conditioned_floor_area_match.group(1).replace(",", ""))
-    return {
-        "report": "LV-B",
-        "space_count": len(spaces),
-        "conditioned_floor_area_sqft": conditioned_floor_area,
-        "spaces": spaces,
-    }
-def extract_lv_d_report(sim_text: str) -> Dict[str, object]:
-    """Extract only the final LV-D summary section by major orientation/category."""
-    lines = sim_text.splitlines()
-    in_lvd = False
-    summary_rows: Dict[str, Dict[str, float]] = {}
-    for raw_line in lines:
-        stripped = raw_line.strip()
-        upper = stripped.upper()
-        if "REPORT- LV-D" in upper:
-            in_lvd = True
-            continue
-        if in_lvd and upper.startswith("REPORT-") and "REPORT- LV-D" not in upper:
-            in_lvd = False
-        if not in_lvd:
-            continue
-        match = LV_D_SUMMARY_ROW_PATTERN.match(raw_line)
-        if not match:
-            continue
-        (
-            orientation,
-            avg_u_value_windows,
-            avg_u_value_walls,
-            avg_u_value_walls_plus_windows,
-            window_area,
-            wall_area,
-            window_plus_wall_area,
-        ) = match.groups()
-        normalized_orientation = " ".join(orientation.split())
-        if normalized_orientation not in LV_D_TARGET_ORIENTATIONS:
-            continue
-        summary_rows[normalized_orientation] = {
-            "avg_u_value_windows": float(avg_u_value_windows),
-            "avg_u_value_walls": float(avg_u_value_walls),
-            "avg_u_value_walls_plus_windows": float(avg_u_value_walls_plus_windows),
-            "window_area": float(window_area),
-            "wall_area": float(wall_area),
-            "window_plus_wall_area": float(window_plus_wall_area),
-        }
-    if not summary_rows:
-        raise ValueError("Could not parse LV-D summary rows from the SIM file.")
-    missing = sorted(LV_D_TARGET_ORIENTATIONS.difference(summary_rows.keys()))
-    return {
-        "report": "LV-D",
-        "columns": LV_D_COLUMNS,
-        "units": LV_D_UNITS,
-        "orientations": summary_rows,
-        "missing_orientations": missing,
-    }
-def extract_lv_i_constructions(sim_text: str) -> Dict[str, object]:
-    """Extract LV-I construction names with U-value and number of response factors."""
-    lines = sim_text.splitlines()
-    in_lvi = False
-    constructions: Dict[str, Dict[str, object]] = {}
-    section_lines: List[str] = []
-    for raw_line in lines:
-        stripped = raw_line.strip()
-        upper = stripped.upper()
-        if "REPORT- LV-I" in upper:
-            in_lvi = True
-            continue
-        if in_lvi and upper.startswith("REPORT-") and "REPORT- LV-I" not in upper:
-            in_lvi = False
-        if not in_lvi:
-            continue
-        section_lines.append(raw_line)
-        match = LV_I_ROW_PATTERN.match(raw_line)
-        if not match:
-            continue
-        construction_name = " ".join(match.group(1).split())
-        u_value = float(match.group(2))
-        response_factors = int(match.group(6))
-        constructions[construction_name] = {
-            "u_value": u_value,
-            "number_of_response_factors": response_factors,
-        }
-    if not constructions:
-        raise ValueError("Could not parse any LV-I construction rows from the SIM file.")
-    unit = "BTU/HR-SQFT-F"
-    section_text = "\n".join(section_lines)
-    unit_match = LV_I_UVALUE_UNIT_PATTERN.search(section_text)
-    if unit_match:
-        unit = unit_match.group(1).strip()
-    return {
-        "report": "LV-I",
-        "u_value_unit": unit,
-        "construction_count": len(constructions),
-        "constructions": constructions,
-    }
-def extract_ls_a_peak_loads(sim_text: str, lv_b_result: Dict[str, object] | None = None) -> Dict[str, object]:
-    """Extract LS-A cooling/heating peak loads and associate them with LV-B spaces."""
-    if lv_b_result is None:
-        lv_b_result = extract_lv_b_spaces(sim_text)
-    lv_b_spaces = lv_b_result["spaces"]
-    lines = sim_text.splitlines()
-    in_lsa = False
-    loads_by_space: Dict[str, Dict[str, float]] = {}
-    units = "KBTU/HR"
-    for raw_line in lines:
-        stripped = raw_line.strip()
-        upper = stripped.upper()
-        if "REPORT- LS-A" in upper:
-            in_lsa = True
-            continue
-        if in_lsa and upper.startswith("REPORT-") and "REPORT- LS-A" not in upper:
-            in_lsa = False
-        if not in_lsa:
-            continue
-        unit_match = LS_A_LOAD_UNIT_PATTERN.search(raw_line)
-        if unit_match:
-            units = unit_match.group(1).strip()
-        if (
-            not stripped
-            or upper.startswith("SPACE NAME")
-            or upper.startswith("MULTIPLIER")
-            or set(stripped) <= {"-", "=", "+"}
-        ):
-            continue
-        parts = [part.strip() for part in re.split(r"\s{2,}", stripped) if part.strip()]
-        if len(parts) < 4:
-            continue
-        space_name = " ".join(parts[0].split())
-        numeric_parts = []
-        for token in parts[3:]:
-            if re.fullmatch(r"-?\d+(?:\.\d+)?", token):
-                numeric_parts.append(float(token))
-        if len(numeric_parts) < 2:
-            continue
-        loads_by_space[space_name] = {
-            "cooling_load": numeric_parts[0],
-            "heating_load": numeric_parts[1],
-        }
-    if not loads_by_space:
-        raise ValueError("Could not parse any LS-A space peak loads from the SIM file.")
-    spaces_with_peak_loads: Dict[str, Dict[str, object]] = {}
-    for space_name, space_data in lv_b_spaces.items():
-        merged = dict(space_data)
-        merged["peak_loads"] = {
-            "cooling_load": loads_by_space.get(space_name, {}).get("cooling_load"),
-            "heating_load": loads_by_space.get(space_name, {}).get("heating_load"),
-            "units": units,
-        }
-        spaces_with_peak_loads[space_name] = merged
-    return {
-        "report": "LS-A",
-        "load_units": units,
-        "space_peak_loads": loads_by_space,
-        "spaces_with_peak_loads": spaces_with_peak_loads,
-    }
-def extract_lv_m_conversions(sim_text: str) -> Dict[str, object]:
-    """Extract conversion factors from LV-M and store them for future unit transforms."""
-    lines = sim_text.splitlines()
-    in_lvm = False
-    conversions: Dict[str, Dict[str, float]] = {}
-    for raw_line in lines:
-        stripped = raw_line.strip()
-        upper = stripped.upper()
-        if "REPORT- LV-M" in upper:
-            in_lvm = True
-            continue
-        if in_lvm and upper.startswith("REPORT-") and "REPORT- LV-M" not in upper:
-            in_lvm = False
-        if not in_lvm:
-            continue
-        parts = [part.strip() for part in re.split(r"\s{2,}", stripped) if part.strip()]
-        # Expected: idx, english, factor1, metric, factor2, english2
-        if len(parts) < 6:
-            continue
-        if not parts[0].isdigit():
-            continue
-        source_unit = parts[1]
-        try:
-            source_to_target = float(parts[2])
-            target_to_source = float(parts[4])
-        except ValueError:
-            continue
-        target_unit = parts[3]
-        reverse_unit = parts[5]
-        conversions.setdefault(source_unit, {})[target_unit] = source_to_target
-        conversions.setdefault(target_unit, {})[reverse_unit] = target_to_source
-    if not conversions:
-        raise ValueError("Could not parse LV-M unit conversion rows from the SIM file.")
-    return {
-        "report": "LV-M",
-        "conversions": conversions,
-        "usage": "Use convert_value(value, from_unit, to_unit, conversions) for future transformations.",
+            "usage": "Use convert_value(value, from_unit, to_unit, conversions) for future transformations.",
     }
 def convert_value(value: float, from_unit: str, to_unit: str, conversions: Dict[str, Dict[str, float]]) -> float:
     """Convert a value between units using LV-M conversion factors (supports chained conversions)."""
@@ -767,10 +412,16 @@ def populate_master_room_list_space_type_table(
     column_lighting_ref = _table_column_letter(master_table_ref, master_table_columns, "Lighting Power Density (W/sqft)")
     column_equip_ref = _table_column_letter(master_table_ref, master_table_columns, "Equipment Power Density (W/sqft)")
     column_people_ref = _table_column_letter(master_table_ref, master_table_columns, "Occupants (# of People)")
-    setpoint_column_name = "Temperature Setpoint (Setback / Set) F"
+    setpoint_column_name = "Temperature Setpoint (F)"
+    setback_column_name = "Temperature Setback (F)"
     column_setpoint_ref = (
         _table_column_letter(master_table_ref, master_table_columns, setpoint_column_name)
         if setpoint_column_name in master_table_columns
+        else None
+    )
+    column_setback_ref = (
+        _table_column_letter(master_table_ref, master_table_columns, setback_column_name)
+        if setback_column_name in master_table_columns
         else None
     )
     thermostat_by_space_key = {
@@ -788,14 +439,18 @@ def populate_master_room_list_space_type_table(
             _set_numeric_cell(row, f"{column_lighting_ref}{row_number}", float(space_data["lights_w_per_sqft"]))
             _set_numeric_cell(row, f"{column_equip_ref}{row_number}", float(space_data["equip_w_per_sqft"]))
             _set_numeric_cell(row, f"{column_people_ref}{row_number}", float(space_data["people"]))
-            if column_setpoint_ref is not None:
+            if column_setpoint_ref is not None or column_setback_ref is not None:
                 setpoint_data = thermostat_by_space_key.get(_canonical_space_key(space_name))
-                setpoint_text = ""
                 if setpoint_data is not None:
                     min_temp = float(setpoint_data["min_thermostat_setpoint_f"])
                     max_temp = float(setpoint_data["max_thermostat_setpoint_f"])
-                    setpoint_text = f"{min_temp:g} / {max_temp:g}"
-                _set_inline_string_cell(row, f"{column_setpoint_ref}{row_number}", setpoint_text)
+                else:
+                    min_temp = None
+                    max_temp = None
+                if column_setpoint_ref is not None:
+                    _set_numeric_cell(row, f"{column_setpoint_ref}{row_number}", max_temp)
+                if column_setback_ref is not None:
+                    _set_numeric_cell(row, f"{column_setback_ref}{row_number}", min_temp)
         else:
             _set_inline_string_cell(row, f"{column_name_ref}{row_number}", "")
             _set_numeric_cell(row, f"{column_area_ref}{row_number}", None)
@@ -803,7 +458,9 @@ def populate_master_room_list_space_type_table(
             _set_numeric_cell(row, f"{column_equip_ref}{row_number}", None)
             _set_numeric_cell(row, f"{column_people_ref}{row_number}", None)
             if column_setpoint_ref is not None:
-                _set_inline_string_cell(row, f"{column_setpoint_ref}{row_number}", "")
+                _set_numeric_cell(row, f"{column_setpoint_ref}{row_number}", None)
+            if column_setback_ref is not None:
+                _set_numeric_cell(row, f"{column_setback_ref}{row_number}", None)
     file_map[master_sheet_path] = ET.tostring(sheet_root, encoding="utf-8", xml_declaration=True)
 
     utility_sheet_path = str(utility_table["sheet_xml_path"])
