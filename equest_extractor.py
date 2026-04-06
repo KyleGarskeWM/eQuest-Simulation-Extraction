@@ -78,18 +78,19 @@ MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 NS = {"m": MAIN_NS}
 MASTER_ROOM_LIST_SHEET_XML_PATH = "xl/worksheets/sheet1.xml"
 MASTER_ROOM_LIST_SPACE_START_ROW = 16
-MASTER_ROOM_LIST_SPACE_MAX_ROWS = 50
-ECM_DATA_SHEET_XML_PATH = "xl/worksheets/sheet10.xml"
+MASTER_ROOM_LIST_SPACE_MAX_ROWS = 298
+UTILITY_RATES_SHEET_XML_PATH = "xl/worksheets/sheet7.xml"
+ECM_DATA_SHEET_XML_PATH = "xl/worksheets/sheet11.xml"
 ECM_DATA_MODEL_START_ROWS = {
-    "BASELINE": 4,
-    "PROPOSED": 34,
-    "ECM-1": 44,
-    "ECM-2": 54,
-    "ECM-3": 64,
-    "ECM-4": 74,
-    "ECM-5": 84,
-    "ECM-6": 94,
-    "ECM-7": 104,
+    "BASELINE": 6,
+    "PROPOSED": 17,
+    "ECM-1": 28,
+    "ECM-2": 39,
+    "ECM-3": 50,
+    "ECM-4": 61,
+    "ECM-5": 72,
+    "ECM-6": 83,
+    "ECM-7": 94,
 }
 BEPS_TO_ECM_END_USE_COLUMNS = {
     "LIGHTS": "B",  # Internal Lighting
@@ -578,6 +579,15 @@ def _to_kbtu(value: float, from_unit: str) -> float:
     return value * KBTU_PER_UNIT[normalized_unit]
 
 
+def _excel_column_name(column_number: int) -> str:
+    name = ""
+    n = column_number
+    while n > 0:
+        n, rem = divmod(n - 1, 26)
+        name = chr(65 + rem) + name
+    return name
+
+
 def _load_master_room_list_sheet(workbook_path: Path) -> ET.Element:
     with zipfile.ZipFile(workbook_path, "r") as workbook_zip:
         try:
@@ -611,30 +621,158 @@ def _read_cell_float(row: ET.Element, cell_ref: str) -> float | None:
         return None
 
 
+def _normalize_space_name(space_name: str) -> str:
+    return re.sub(r"[^A-Z0-9]", "", space_name.upper())
+
+
+def extract_hourly_thermostat_setpoint_ranges(sim_text: str) -> Dict[str, object]:
+    """Extract per-space min/max thermostat setpoint values from REPORT- HOURLY sections."""
+    lines = sim_text.splitlines()
+    in_hourly = False
+    current_space_name = None
+    setpoint_values_by_space: Dict[str, List[float]] = {}
+    canonical_to_name: Dict[str, str] = {}
+    for raw_line in lines:
+        stripped = raw_line.strip()
+        upper = stripped.upper()
+        if "REPORT- HOURLY" in upper:
+            in_hourly = True
+            current_space_name = None
+            continue
+        if in_hourly and upper.startswith("REPORT-") and "REPORT- HOURLY" not in upper:
+            in_hourly = False
+            current_space_name = None
+        if not in_hourly or not stripped:
+            continue
+        if upper.startswith("SPACE:"):
+            current_space_name = stripped.split(":", 1)[1].strip()
+            canonical = _normalize_space_name(current_space_name)
+            canonical_to_name.setdefault(canonical, current_space_name)
+            setpoint_values_by_space.setdefault(canonical, [])
+            continue
+        if current_space_name is None:
+            continue
+        if "THERMOSTAT SETPOINT" not in upper and not re.match(r"^\d+\s+", stripped):
+            continue
+        number_tokens = re.findall(r"-?\d+(?:\.\d+)?", stripped)
+        if len(number_tokens) < 2:
+            continue
+        try:
+            setpoint_value = float(number_tokens[1])
+        except ValueError:
+            continue
+        canonical = _normalize_space_name(current_space_name)
+        setpoint_values_by_space.setdefault(canonical, []).append(setpoint_value)
+    spaces: Dict[str, Dict[str, float]] = {}
+    for canonical_name, values in setpoint_values_by_space.items():
+        if not values:
+            continue
+        display_name = canonical_to_name.get(canonical_name, canonical_name)
+        spaces[display_name] = {
+            "min_thermostat_setpoint_f": min(values),
+            "max_thermostat_setpoint_f": max(values),
+        }
+    return {
+        "report": "HOURLY",
+        "space_count": len(spaces),
+        "spaces": spaces,
+    }
+
+
+def _write_utility_rate_table_from_es_d(
+    file_map: Dict[str, bytes],
+    es_d_result: Dict[str, object],
+) -> None:
+    if UTILITY_RATES_SHEET_XML_PATH not in file_map:
+        raise ValueError("Could not find Utilities worksheet XML in workbook.")
+    utility_root = _parse_xml_with_registered_namespaces(file_map[UTILITY_RATES_SHEET_XML_PATH])
+    utility_sheet_data = utility_root.find("m:sheetData", NS)
+    if utility_sheet_data is None:
+        raise ValueError("Utilities sheet is missing sheetData.")
+    utility_rates = es_d_result["utility_rates"]
+    elec_virtual_rate = None
+    gas_virtual_rate = None
+    for rate_data in utility_rates.values():
+        unit = str(rate_data["unit"]).upper()
+        if unit == "KWH" and elec_virtual_rate is None:
+            elec_virtual_rate = float(rate_data["virtual_rate"])
+        elif unit == "THERM" and gas_virtual_rate is None:
+            gas_virtual_rate = float(rate_data["virtual_rate"])
+    if elec_virtual_rate is None or gas_virtual_rate is None:
+        raise ValueError("Could not find ES-D virtual rates for both electricity (KWH) and gas (THERM).")
+    row_2 = _ensure_row(utility_sheet_data, 2)
+    row_3 = _ensure_row(utility_sheet_data, 3)
+    _set_inline_string_cell(row_2, "B2", "Electrical")
+    _set_inline_string_cell(row_2, "C2", "kWh")
+    _set_numeric_cell(row_2, "D2", elec_virtual_rate)
+    _set_numeric_cell(row_2, "E2", elec_virtual_rate / KBTU_PER_UNIT["KWH"])
+    _set_inline_string_cell(row_3, "B3", "Natural Gas")
+    _set_inline_string_cell(row_3, "C3", "Therms")
+    _set_numeric_cell(row_3, "D3", gas_virtual_rate)
+    _set_numeric_cell(row_3, "E3", gas_virtual_rate / KBTU_PER_UNIT["THERM"])
+    file_map[UTILITY_RATES_SHEET_XML_PATH] = ET.tostring(utility_root, encoding="utf-8", xml_declaration=True)
+
+
 def populate_master_room_list_space_type_table(
     sim_text: str,
     workbook_path: Path,
     output_workbook_path: Path,
 ) -> Dict[str, object]:
-    """Populate Master Room List 'Space Type Table' with LV-B space names and areas."""
+    """Populate Master Room List 'Space Type Table' and Utilities table from LV-B + HOURLY + ES-D."""
     lv_b_result = extract_lv_b_spaces(sim_text)
+    hourly_result = extract_hourly_thermostat_setpoint_ranges(sim_text)
+    try:
+        es_d_result = extract_es_d_energy_cost_summary(sim_text)
+    except ValueError:
+        es_d_result = {"utility_rates": {}}
+    hourly_by_space = {
+        _normalize_space_name(space_name): values
+        for space_name, values in hourly_result["spaces"].items()
+    }
     spaces = list(lv_b_result["spaces"].items())
     if not spaces:
         raise ValueError("No LV-B spaces found to populate the Master Room List.")
     if load_workbook is not None:
         workbook = load_workbook(workbook_path, keep_vba=True)
         sheet = workbook["Master Room List"]
+        utility_sheet = workbook["Utilities"]
         max_rows = MASTER_ROOM_LIST_SPACE_MAX_ROWS
         start_row = MASTER_ROOM_LIST_SPACE_START_ROW
         for index in range(max_rows):
             row_number = start_row + index
             if index < len(spaces):
                 space_name, space_data = spaces[index]
+                thermostat_data = hourly_by_space.get(_normalize_space_name(space_name), {})
                 sheet[f"D{row_number}"] = space_name
                 sheet[f"G{row_number}"] = float(space_data["area_sqft"])
+                sheet[f"H{row_number}"] = float(space_data["lights_w_per_sqft"])
+                sheet[f"I{row_number}"] = float(space_data["equip_w_per_sqft"])
+                sheet[f"J{row_number}"] = float(space_data["people"])
+                sheet[f"K{row_number}"] = thermostat_data.get("max_thermostat_setpoint_f")
+                sheet[f"L{row_number}"] = thermostat_data.get("min_thermostat_setpoint_f")
             else:
                 sheet[f"D{row_number}"] = None
                 sheet[f"G{row_number}"] = None
+                sheet[f"H{row_number}"] = None
+                sheet[f"I{row_number}"] = None
+                sheet[f"J{row_number}"] = None
+                sheet[f"K{row_number}"] = None
+                sheet[f"L{row_number}"] = None
+        utility_rates = es_d_result["utility_rates"]
+        elec_virtual_rate = next(
+            float(data["virtual_rate"]) for data in utility_rates.values() if str(data["unit"]).upper() == "KWH"
+        )
+        gas_virtual_rate = next(
+            float(data["virtual_rate"]) for data in utility_rates.values() if str(data["unit"]).upper() == "THERM"
+        )
+        utility_sheet["B2"] = "Electrical"
+        utility_sheet["C2"] = "kWh"
+        utility_sheet["D2"] = elec_virtual_rate
+        utility_sheet["E2"] = elec_virtual_rate / KBTU_PER_UNIT["KWH"]
+        utility_sheet["B3"] = "Natural Gas"
+        utility_sheet["C3"] = "Therms"
+        utility_sheet["D3"] = gas_virtual_rate
+        utility_sheet["E3"] = gas_virtual_rate / KBTU_PER_UNIT["THERM"]
         workbook.save(output_workbook_path)
         return {
             "target_sheet": "Master Room List",
@@ -644,6 +782,7 @@ def populate_master_room_list_space_type_table(
             "spaces_found": len(spaces),
             "spaces_written": min(len(spaces), max_rows),
             "spaces_truncated": max(len(spaces) - max_rows, 0),
+            "utilities_updated": True,
             "output_workbook": str(output_workbook_path),
         }
     ET.register_namespace("", MAIN_NS)
@@ -656,12 +795,32 @@ def populate_master_room_list_space_type_table(
         raise ValueError("Workbook sheet is missing sheetData.")
     text_style_template = None
     area_style_template = None
+    lpd_style_template = None
+    epd_style_template = None
+    occupancy_style_template = None
+    setpoint_style_template = None
+    setback_style_template = None
     text_template_cell = sheet_root.find(".//m:c[@r='E16']", NS)
     area_template_cell = sheet_root.find(".//m:c[@r='G16']", NS)
+    lpd_template_cell = sheet_root.find(".//m:c[@r='H16']", NS)
+    epd_template_cell = sheet_root.find(".//m:c[@r='I16']", NS)
+    occupancy_template_cell = sheet_root.find(".//m:c[@r='J16']", NS)
+    setpoint_template_cell = sheet_root.find(".//m:c[@r='K16']", NS)
+    setback_template_cell = sheet_root.find(".//m:c[@r='L16']", NS)
     if text_template_cell is not None:
         text_style_template = text_template_cell.attrib.get("s")
     if area_template_cell is not None:
         area_style_template = area_template_cell.attrib.get("s")
+    if lpd_template_cell is not None:
+        lpd_style_template = lpd_template_cell.attrib.get("s")
+    if epd_template_cell is not None:
+        epd_style_template = epd_template_cell.attrib.get("s")
+    if occupancy_template_cell is not None:
+        occupancy_style_template = occupancy_template_cell.attrib.get("s")
+    if setpoint_template_cell is not None:
+        setpoint_style_template = setpoint_template_cell.attrib.get("s")
+    if setback_template_cell is not None:
+        setback_style_template = setback_template_cell.attrib.get("s")
     max_rows = MASTER_ROOM_LIST_SPACE_MAX_ROWS
     start_row = MASTER_ROOM_LIST_SPACE_START_ROW
     for index in range(max_rows):
@@ -669,14 +828,41 @@ def populate_master_room_list_space_type_table(
         row = _ensure_row(sheet_data, row_number)
         name_ref = f"D{row_number}"
         area_ref = f"G{row_number}"
+        lpd_ref = f"H{row_number}"
+        epd_ref = f"I{row_number}"
+        occupants_ref = f"J{row_number}"
+        setpoint_ref = f"K{row_number}"
+        setback_ref = f"L{row_number}"
         if index < len(spaces):
             space_name, space_data = spaces[index]
+            thermostat_data = hourly_by_space.get(_normalize_space_name(space_name), {})
             _set_inline_string_cell(row, name_ref, space_name, style=text_style_template)
             _set_numeric_cell(row, area_ref, float(space_data["area_sqft"]), style=area_style_template)
+            _set_numeric_cell(row, lpd_ref, float(space_data["lights_w_per_sqft"]), style=lpd_style_template)
+            _set_numeric_cell(row, epd_ref, float(space_data["equip_w_per_sqft"]), style=epd_style_template)
+            _set_numeric_cell(row, occupants_ref, float(space_data["people"]), style=occupancy_style_template)
+            _set_numeric_cell(
+                row,
+                setpoint_ref,
+                thermostat_data.get("max_thermostat_setpoint_f"),
+                style=setpoint_style_template,
+            )
+            _set_numeric_cell(
+                row,
+                setback_ref,
+                thermostat_data.get("min_thermostat_setpoint_f"),
+                style=setback_style_template,
+            )
         else:
             _set_inline_string_cell(row, name_ref, "", style=text_style_template)
             _set_numeric_cell(row, area_ref, None, style=area_style_template)
+            _set_numeric_cell(row, lpd_ref, None, style=lpd_style_template)
+            _set_numeric_cell(row, epd_ref, None, style=epd_style_template)
+            _set_numeric_cell(row, occupants_ref, None, style=occupancy_style_template)
+            _set_numeric_cell(row, setpoint_ref, None, style=setpoint_style_template)
+            _set_numeric_cell(row, setback_ref, None, style=setback_style_template)
     file_map[MASTER_ROOM_LIST_SHEET_XML_PATH] = ET.tostring(sheet_root, encoding="utf-8", xml_declaration=True)
+    _write_utility_rate_table_from_es_d(file_map, es_d_result)
     _save_zip_file_map(file_map, output_workbook_path)
     return {
         "target_sheet": "Master Room List",
@@ -685,6 +871,7 @@ def populate_master_room_list_space_type_table(
         "spaces_found": len(spaces),
         "spaces_written": min(len(spaces), max_rows),
         "spaces_truncated": max(len(spaces) - max_rows, 0),
+        "utilities_updated": True,
         "output_workbook": str(output_workbook_path),
     }
 
@@ -703,27 +890,21 @@ def populate_ecm_data_from_reports(
             "(Baseline-2 and Baseline-3 are intentionally ignored)."
         )
     beps_result = extract_beps_report(sim_text)
-    es_d_result = extract_es_d_energy_cost_summary(sim_text)
+    try:
+        es_d_result = extract_es_d_energy_cost_summary(sim_text)
+    except ValueError:
+        es_d_result = {"utility_rates": {}}
     elec_totals = beps_result["totals_by_fuel"]["electricity"]
     gas_totals = beps_result["totals_by_fuel"]["natural_gas"]
     elec_unit = elec_totals["unit"]
     gas_unit = gas_totals["unit"]
-    end_use_values_kbtu: Dict[str, float] = {}
-    fuel_conflicts: List[str] = []
+    elec_end_use_values_kbtu: Dict[str, float] = {}
+    gas_end_use_values_kbtu: Dict[str, float] = {}
     for beps_column, target_column in BEPS_TO_ECM_END_USE_COLUMNS.items():
         elec_value = float(elec_totals["by_end_use"][beps_column])
         gas_value = float(gas_totals["by_end_use"][beps_column])
-        elec_kbtu = _to_kbtu(elec_value, elec_unit) if abs(elec_value) > 1e-9 else 0.0
-        gas_kbtu = _to_kbtu(gas_value, gas_unit) if abs(gas_value) > 1e-9 else 0.0
-        if abs(elec_kbtu) > 1e-9 and abs(gas_kbtu) > 1e-9:
-            fuel_conflicts.append(beps_column)
-            continue
-        end_use_values_kbtu[target_column] = elec_kbtu if abs(elec_kbtu) > 1e-9 else gas_kbtu
-    if fuel_conflicts:
-        raise ValueError(
-            "Each BEPS end use is expected to have a single fuel type; found both electricity and gas for: "
-            + ", ".join(fuel_conflicts)
-        )
+        elec_end_use_values_kbtu[target_column] = _to_kbtu(elec_value, elec_unit) if abs(elec_value) > 1e-9 else 0.0
+        gas_end_use_values_kbtu[target_column] = _to_kbtu(gas_value, gas_unit) if abs(gas_value) > 1e-9 else 0.0
     total_electric_kbtu = _to_kbtu(float(elec_totals["by_end_use"]["TOTAL"]), elec_unit)
     total_gas_kbtu = _to_kbtu(float(gas_totals["by_end_use"]["TOTAL"]), gas_unit)
     total_energy_kbtu = total_electric_kbtu + total_gas_kbtu
@@ -736,42 +917,43 @@ def populate_ecm_data_from_reports(
             elec_virtual_rate = float(rate_data["virtual_rate"])
         elif unit == "THERM" and gas_virtual_rate is None:
             gas_virtual_rate = float(rate_data["virtual_rate"])
-    if elec_virtual_rate is None or gas_virtual_rate is None:
-        raise ValueError("Could not find ES-D virtual rates for both electricity (KWH) and gas (THERM).")
+    if elec_virtual_rate is None:
+        elec_virtual_rate = 0.0
+    if gas_virtual_rate is None:
+        gas_virtual_rate = 0.0
     elec_rate_per_kbtu = elec_virtual_rate / KBTU_PER_UNIT["KWH"]
     gas_rate_per_kbtu = gas_virtual_rate / KBTU_PER_UNIT["THERM"]
     elec_cost = total_electric_kbtu * elec_rate_per_kbtu
     gas_cost = total_gas_kbtu * gas_rate_per_kbtu
     total_cost = elec_cost + gas_cost
     section_start = ECM_DATA_MODEL_START_ROWS[normalized_model_run_type]
-    energy_row_number = section_start + 4
-    demand_row_number = section_start + 5
-    total_elec_row_number = section_start + 6
-    total_gas_row_number = section_start + 7
-    total_energy_row_number = section_start + 8
+    elec_energy_row_number = section_start + 1
+    elec_demand_row_number = section_start + 2
+    gas_energy_row_number = section_start + 3
+    gas_demand_row_number = section_start + 4
+    writable_columns = "BCDEFGHIJKLMNOPQRS"
     if load_workbook is not None:
         workbook = load_workbook(workbook_path, keep_vba=True)
         sheet = workbook["ECM Data"]
-        for col in "BCDEFGHIJKLMNOPQRST":
-            sheet[f"{col}{energy_row_number}"] = None
-            sheet[f"{col}{demand_row_number}"] = None
-        for col, value in end_use_values_kbtu.items():
-            sheet[f"{col}{energy_row_number}"] = value
-        sheet[f"B{total_elec_row_number}"] = total_electric_kbtu
-        sheet[f"B{total_gas_row_number}"] = total_gas_kbtu
-        sheet[f"B{total_energy_row_number}"] = total_energy_kbtu
-        sheet[f"D{total_elec_row_number}"] = elec_cost
-        sheet[f"D{total_gas_row_number}"] = gas_cost
-        sheet[f"D{total_energy_row_number}"] = total_cost
-        sheet[f"F{total_elec_row_number}"] = elec_rate_per_kbtu
-        sheet[f"F{total_gas_row_number}"] = gas_rate_per_kbtu
+        for col in writable_columns:
+            sheet[f"{col}{elec_energy_row_number}"] = None
+            sheet[f"{col}{elec_demand_row_number}"] = None
+            sheet[f"{col}{gas_energy_row_number}"] = None
+            sheet[f"{col}{gas_demand_row_number}"] = None
+        for col, value in elec_end_use_values_kbtu.items():
+            sheet[f"{col}{elec_energy_row_number}"] = value
+        for col, value in gas_end_use_values_kbtu.items():
+            sheet[f"{col}{gas_energy_row_number}"] = value
         workbook.save(output_workbook_path)
         return {
             "sheet": "ECM Data",
             "writer": "openpyxl",
+            "target_table": f"ECMData_{normalized_model_run_type.replace('-', '')}" if normalized_model_run_type.startswith("ECM-") else f"ECMData_{normalized_model_run_type.title()}",
             "model_run_type": model_run_type,
             "section_start_row": section_start,
-            "end_use_columns_written": sorted(end_use_values_kbtu.keys()),
+            "electrical_energy_row": elec_energy_row_number,
+            "natural_gas_energy_row": gas_energy_row_number,
+            "end_use_columns_written": sorted(elec_end_use_values_kbtu.keys()),
             "left_blank_columns": ECM_OPTIONAL_BLANK_COLUMNS,
             "total_electric_kbtu": total_electric_kbtu,
             "total_gas_kbtu": total_gas_kbtu,
@@ -791,31 +973,29 @@ def populate_ecm_data_from_reports(
     sheet_data = sheet_root.find("m:sheetData", NS)
     if sheet_data is None:
         raise ValueError("ECM Data sheet is missing sheetData.")
-    energy_row = _ensure_row(sheet_data, energy_row_number)
-    demand_row = _ensure_row(sheet_data, demand_row_number)
-    total_elec_row = _ensure_row(sheet_data, total_elec_row_number)
-    total_gas_row = _ensure_row(sheet_data, total_gas_row_number)
-    total_energy_row = _ensure_row(sheet_data, total_energy_row_number)
-    for col in "BCDEFGHIJKLMNOPQRST":
-        _set_numeric_cell(energy_row, f"{col}{energy_row_number}", None)
-        _set_numeric_cell(demand_row, f"{col}{demand_row_number}", None)
-    for col, value in end_use_values_kbtu.items():
-        _set_numeric_cell(energy_row, f"{col}{energy_row_number}", value)
-    _set_numeric_cell(total_elec_row, f"B{total_elec_row_number}", total_electric_kbtu)
-    _set_numeric_cell(total_gas_row, f"B{total_gas_row_number}", total_gas_kbtu)
-    _set_numeric_cell(total_energy_row, f"B{total_energy_row_number}", total_energy_kbtu)
-    _set_numeric_cell(total_elec_row, f"D{total_elec_row_number}", elec_cost)
-    _set_numeric_cell(total_gas_row, f"D{total_gas_row_number}", gas_cost)
-    _set_numeric_cell(total_energy_row, f"D{total_energy_row_number}", total_cost)
-    _set_numeric_cell(total_elec_row, f"F{total_elec_row_number}", elec_rate_per_kbtu)
-    _set_numeric_cell(total_gas_row, f"F{total_gas_row_number}", gas_rate_per_kbtu)
+    elec_energy_row = _ensure_row(sheet_data, elec_energy_row_number)
+    elec_demand_row = _ensure_row(sheet_data, elec_demand_row_number)
+    gas_energy_row = _ensure_row(sheet_data, gas_energy_row_number)
+    gas_demand_row = _ensure_row(sheet_data, gas_demand_row_number)
+    for col in writable_columns:
+        _set_numeric_cell(elec_energy_row, f"{col}{elec_energy_row_number}", None)
+        _set_numeric_cell(elec_demand_row, f"{col}{elec_demand_row_number}", None)
+        _set_numeric_cell(gas_energy_row, f"{col}{gas_energy_row_number}", None)
+        _set_numeric_cell(gas_demand_row, f"{col}{gas_demand_row_number}", None)
+    for col, value in elec_end_use_values_kbtu.items():
+        _set_numeric_cell(elec_energy_row, f"{col}{elec_energy_row_number}", value)
+    for col, value in gas_end_use_values_kbtu.items():
+        _set_numeric_cell(gas_energy_row, f"{col}{gas_energy_row_number}", value)
     file_map[ECM_DATA_SHEET_XML_PATH] = ET.tostring(sheet_root, encoding="utf-8", xml_declaration=True)
     _save_zip_file_map(file_map, output_workbook_path)
     return {
         "sheet": "ECM Data",
+        "target_table": f"ECMData_{normalized_model_run_type.replace('-', '')}" if normalized_model_run_type.startswith("ECM-") else f"ECMData_{normalized_model_run_type.title()}",
         "model_run_type": model_run_type,
         "section_start_row": section_start,
-        "end_use_columns_written": sorted(end_use_values_kbtu.keys()),
+        "electrical_energy_row": elec_energy_row_number,
+        "natural_gas_energy_row": gas_energy_row_number,
+        "end_use_columns_written": sorted(elec_end_use_values_kbtu.keys()),
         "left_blank_columns": ECM_OPTIONAL_BLANK_COLUMNS,
         "total_electric_kbtu": total_electric_kbtu,
         "total_gas_kbtu": total_gas_kbtu,
@@ -1093,6 +1273,77 @@ def extract_ps_h_details(sim_text: str) -> Dict[str, object]:
         "pumps": pumps,
         "equipment": equipment,
     }
+
+
+def extract_schedule_table(sim_text: str) -> Dict[str, object]:
+    """Extract REPORT- SCHEDULES rows into a table-like structure."""
+    lines = sim_text.splitlines()
+    in_schedules = False
+    header: List[str] | None = None
+    rows: List[Dict[str, str]] = []
+    for raw_line in lines:
+        stripped = raw_line.strip()
+        upper = stripped.upper()
+        if "REPORT- SCHEDULES" in upper:
+            in_schedules = True
+            header = None
+            continue
+        if in_schedules and upper.startswith("REPORT-") and "REPORT- SCHEDULES" not in upper:
+            break
+        if not in_schedules or not stripped:
+            continue
+        if header is None and "SCHEDULE NAME" in upper and "SCHEDULE TYPE" in upper:
+            header = [part.strip() for part in re.split(r"\s{2,}", stripped) if part.strip()]
+            continue
+        if header is None:
+            continue
+        parts = [part.strip() for part in re.split(r"\s{2,}", stripped) if part.strip()]
+        if len(parts) < len(header):
+            continue
+        row = {header[idx]: parts[idx] for idx in range(len(header))}
+        rows.append(row)
+    return {"report": "SCHEDULE", "rows": rows}
+
+
+def populate_equest_schedule_importer_table(
+    sim_text: str,
+    workbook_path: Path,
+    output_workbook_path: Path,
+) -> Dict[str, object]:
+    """Populate the eQuest Schedule Importer tab from REPORT- SCHEDULES."""
+    schedule_result = extract_schedule_table(sim_text)
+    rows = schedule_result["rows"]
+    ET.register_namespace("", MAIN_NS)
+    file_map = _load_zip_file_map(workbook_path)
+    schedule_sheet_path = "xl/worksheets/sheet16.xml"
+    if schedule_sheet_path not in file_map:
+        raise ValueError("Could not find eQuest Schedule Importer worksheet XML in workbook.")
+    sheet_root = _parse_xml_with_registered_namespaces(file_map[schedule_sheet_path])
+    sheet_data = sheet_root.find("m:sheetData", NS)
+    if sheet_data is None:
+        raise ValueError("eQuest Schedule Importer sheet is missing sheetData.")
+    start_row = 2
+    max_rows = 79
+    for idx in range(max_rows):
+        row_number = start_row + idx
+        row = _ensure_row(sheet_data, row_number)
+        row_data = rows[idx] if idx < len(rows) else {}
+        _set_inline_string_cell(row, f"A{row_number}", row_data.get("Schedule Name", ""))
+        _set_inline_string_cell(row, f"B{row_number}", row_data.get("Schedule Type", ""))
+        for hour in range(1, 25):
+            col = _excel_column_name(13 + hour)
+            value = row_data.get(str(hour))
+            numeric_value = float(value) if value not in (None, "") else None
+            _set_numeric_cell(row, f"{col}{row_number}", numeric_value)
+    file_map[schedule_sheet_path] = ET.tostring(sheet_root, encoding="utf-8", xml_declaration=True)
+    _save_zip_file_map(file_map, output_workbook_path)
+    return {
+        "target_sheet": "eQuest Schedule Importer",
+        "target_table": "eQuest_Schedule_Importer",
+        "rows_written": min(len(rows), max_rows),
+        "rows_available": max_rows,
+        "output_workbook": str(output_workbook_path),
+    }
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Extract BEPS, LV-B, LV-D, LV-I, LS-A, LV-M, ES-D, and PS-H report data from an eQuest SIM file."
@@ -1131,6 +1382,11 @@ def main() -> None:
         help="Path to workbook .xlsm where ECM Data should be populated from BEPS/ES-D.",
     )
     parser.add_argument(
+        "--populate-schedules",
+        type=Path,
+        help="Path to workbook .xlsm where eQuest Schedule Importer should be populated.",
+    )
+    parser.add_argument(
         "--list-reports",
         action="store_true",
         help="List discovered REPORT-* sections in the SIM file and exit.",
@@ -1148,6 +1404,16 @@ def main() -> None:
             sim_text=sim_text,
             workbook_path=args.update_ecm_data,
             model_run_type=model_run_type,
+            output_workbook_path=args.output_workbook,
+        )
+        print(json.dumps(result, indent=args.indent))
+        return
+    if args.populate_schedules:
+        if not args.output_workbook:
+            raise ValueError("--output-workbook is required when using --populate-schedules.")
+        result = populate_equest_schedule_importer_table(
+            sim_text=sim_text,
+            workbook_path=args.populate_schedules,
             output_workbook_path=args.output_workbook,
         )
         print(json.dumps(result, indent=args.indent))
