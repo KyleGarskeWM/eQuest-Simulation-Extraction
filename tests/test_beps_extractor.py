@@ -1,4 +1,5 @@
 import os
+import re
 import tempfile
 import unittest
 import xml.etree.ElementTree as ET
@@ -24,7 +25,6 @@ from equest_extractor import (
     extract_es_d_energy_cost_summary,
     extract_ps_h_details,
 )
-
 
 class TestBepsExtractor(unittest.TestCase):
     def test_run_local_build_command_modes(self):
@@ -267,6 +267,39 @@ class TestBepsExtractor(unittest.TestCase):
             self.assertIn(b"xmlns:mc=", sheet_payload)
             self.assertIn(b"mc:Ignorable=", sheet_payload)
 
+    def test_populates_utility_rows_when_es_d_uses_project_specific_rate_names(self):
+        workbook_path = Path("output_files/Building Performance Assumptions-v2.xlsm")
+        sim_text = """
+        REPORT- LV-B Summary of Spaces
+        Spaces on floor: Level 1
+        010-Bike Storage                     1.0   INT   89.4    0.80    1.0    0.50   AIR-CHANGE  0.10      1038.1      12457.7
+        CONDITIONED FLOOR AREA          =     107479.2  SQFT
+        REPORT- ES-D Energy Cost Summary
+        UTILITY-RATE                       RESOURCE           METERS              UNITS/YR               ($)     ($/UNIT)   ALL YEAR?
+        PG&E-E                             ELECTRICITY        EM1   COMM       636613. KWH           108224.       0.1700      YES
+        PG&E-G                             NATURAL-GAS        FM1               50910. THERM          59056.       1.1600      YES
+        REPORT- LS-A
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "Building Performance Assumptions.updated.xlsm"
+            result = populate_master_room_list_space_type_table(
+                sim_text=sim_text,
+                workbook_path=workbook_path,
+                output_workbook_path=output_path,
+            )
+            self.assertEqual(result["utility_rows_written"], 2)
+            with zipfile.ZipFile(output_path, "r") as workbook_zip:
+                utility_sheet = ET.fromstring(workbook_zip.read("xl/worksheets/sheet7.xml"))
+            ns = {"m": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+            c2 = utility_sheet.find(".//m:c[@r='C2']", ns)
+            d2 = utility_sheet.find(".//m:c[@r='D2']/m:v", ns)
+            c3 = utility_sheet.find(".//m:c[@r='C3']", ns)
+            d3 = utility_sheet.find(".//m:c[@r='D3']/m:v", ns)
+            self.assertEqual("".join(node.text or "" for node in c2.iter("{http://schemas.openxmlformats.org/spreadsheetml/2006/main}t")), "KWH")
+            self.assertAlmostEqual(float(d2.text), 0.17, places=4)
+            self.assertEqual("".join(node.text or "" for node in c3.iter("{http://schemas.openxmlformats.org/spreadsheetml/2006/main}t")), "THERM")
+            self.assertAlmostEqual(float(d3.text), 1.16, places=4)
+
     def test_non_baseline_comparison_returns_true_when_matching(self):
         sim_text = Path("St Anselm Baseline ABS_Rev_0 - Baseline Design.SIM").read_text(errors="ignore")
         workbook_path = Path("Building Performance Assumptions.xlsm")
@@ -307,6 +340,49 @@ class TestBepsExtractor(unittest.TestCase):
                 sim_text=mutated_sim_text,
                 workbook_path=populated_path,
             )
+            self.assertFalse(comparison["space_type_table_match"])
+            self.assertGreater(comparison["mismatch_count"], 0)
+
+    def test_non_baseline_comparison_checks_rows_beyond_legacy_50_row_limit(self):
+        space_rows = []
+        for idx in range(1, 81):
+            space_rows.append(
+                f"{idx:03d}-Space{idx:03d}                     1.0   INT   89.4    0.80    1.0    0.50   AIR-CHANGE  0.10      {1000 + idx:.1f}      12457.7"
+            )
+        sim_text = (
+            "REPORT- LV-B Summary of Spaces\n"
+            "Spaces on floor: Level 1\n"
+            + "\n".join(space_rows)
+            + "\nCONDITIONED FLOOR AREA          =     107479.2  SQFT\n"
+            + "REPORT- ES-D Energy Cost Summary\n"
+            + "UTILITY-RATE                       RESOURCE           METERS              UNITS/YR               ($)     ($/UNIT)   ALL YEAR?\n"
+            + "Elec                               ELECTRICITY        EM1   COMM       636613. KWH           108224.       0.1700      YES\n"
+            + "Gas                                NATURAL-GAS        FM1               50910. THERM          59056.       1.1600      YES\n"
+            + "REPORT- LS-A\n"
+        )
+        workbook_path = Path("output_files/Building Performance Assumptions-v2.xlsm")
+        lv_b_result = extract_lv_b_spaces(sim_text)
+        spaces = list(lv_b_result["spaces"].items())
+        self.assertGreater(len(spaces), 60)
+        changed_space_name, changed_space_data = spaces[55]
+        mutated_line = (
+            f"{changed_space_name} Changed                     1.0   INT   89.4    0.80    1.0    0.50   AIR-CHANGE  0.10"
+            f"      {float(changed_space_data['area_sqft']):.1f}      12457.7"
+        )
+        pattern = re.compile(rf"^\s*{re.escape(changed_space_name)}\s+.*$", re.MULTILINE)
+        mutated_sim_text = pattern.sub(mutated_line, sim_text, count=1)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            populated_path = Path(temp_dir) / "baseline_populated.xlsm"
+            populate_master_room_list_space_type_table(
+                sim_text=sim_text,
+                workbook_path=workbook_path,
+                output_workbook_path=populated_path,
+            )
+            comparison = check_master_room_list_space_type_table_match(
+                sim_text=mutated_sim_text,
+                workbook_path=populated_path,
+            )
+            self.assertGreater(comparison["rows_available"], 50)
             self.assertFalse(comparison["space_type_table_match"])
             self.assertGreater(comparison["mismatch_count"], 0)
 

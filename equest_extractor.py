@@ -827,10 +827,10 @@ def populate_master_room_list_space_type_table(
     utility_columns = list(utility_table["columns"])
     _, utility_start_row, _, utility_end_row = _parse_range_ref(utility_ref)
     utility_rows = utility_end_row - utility_start_row
-    utility_mapping = {
-        "Elec": "Electrical",
-        "Gas": "Natural Gas",
-    }
+    utility_mapping = [
+        ("Elec", "Electrical", {"ELECTRICITY"}, {"KWH"}),
+        ("Gas", "Natural Gas", {"NATURAL-GAS", "NATURAL GAS"}, {"THERM"}),
+    ]
     provider_col = _table_column_letter(utility_ref, utility_columns, "Utility Provider")
     power_type_col = _table_column_letter(utility_ref, utility_columns, "Power Type")
     unit_col = _table_column_letter(utility_ref, utility_columns, "Unit of Measurement")
@@ -841,9 +841,15 @@ def populate_master_room_list_space_type_table(
         row_number = (utility_start_row + 1) + index
         row = _ensure_row(utility_sheet_data, row_number)
         if index < len(utility_mapping):
-            provider = list(utility_mapping.keys())[index]
-            power_type = utility_mapping[provider]
+            provider, power_type, preferred_resources, preferred_units = utility_mapping[index]
             rate_data = available_rates.get(provider, {})
+            if not rate_data:
+                for candidate in available_rates.values():
+                    resource = str(candidate.get("resource", "")).upper()
+                    unit = str(candidate.get("unit", "")).upper()
+                    if resource in preferred_resources or unit in preferred_units:
+                        rate_data = candidate
+                        break
             _set_inline_string_cell(row, f"{provider_col}{row_number}", provider)
             _set_inline_string_cell(row, f"{power_type_col}{row_number}", power_type)
             _set_inline_string_cell(row, f"{unit_col}{row_number}", str(rate_data.get("unit", "")))
@@ -957,16 +963,33 @@ def populate_ecm_data_from_reports(
 def check_master_room_list_space_type_table_match(sim_text: str, workbook_path: Path) -> Dict[str, object]:
     """Compare LV-B spaces against existing Master Room List Space Type Table values."""
     lv_b_result = extract_lv_b_spaces(sim_text)
-    expected_spaces = list(lv_b_result["spaces"].items())[:MASTER_ROOM_LIST_SPACE_MAX_ROWS]
+    table_start_row = MASTER_ROOM_LIST_SPACE_START_ROW - 1
+    rows_available = MASTER_ROOM_LIST_SPACE_MAX_ROWS
+    name_col = "D"
+    area_col = "G"
+    try:
+        file_map = _load_zip_file_map(workbook_path)
+        table_index = _build_table_index(file_map)
+        master_table = table_index.get("MasterRoomList_SpaceTypeTable")
+        if master_table is not None:
+            master_ref = str(master_table["ref"])
+            master_columns = list(master_table["columns"])
+            name_col = _table_column_letter(master_ref, master_columns, "Space Name")
+            area_col = _table_column_letter(master_ref, master_columns, "Area (sf)")
+            _, table_start_row, _, table_end_row = _parse_range_ref(master_ref)
+            rows_available = max(table_end_row - table_start_row, 0)
+    except Exception:
+        pass
+    expected_spaces = list(lv_b_result["spaces"].items())[:rows_available]
     if load_workbook is not None:
         workbook = load_workbook(workbook_path, keep_vba=True, data_only=True)
         sheet = workbook["Master Room List"]
         mismatches: List[Dict[str, object]] = []
         compared_rows = 0
-        for index in range(MASTER_ROOM_LIST_SPACE_MAX_ROWS):
-            row_number = MASTER_ROOM_LIST_SPACE_START_ROW + index
-            existing_name = sheet[f"D{row_number}"].value
-            existing_area = sheet[f"G{row_number}"].value
+        for index in range(rows_available):
+            row_number = (table_start_row + 1) + index
+            existing_name = sheet[f"{name_col}{row_number}"].value
+            existing_area = sheet[f"{area_col}{row_number}"].value
             existing_name = str(existing_name).strip() if existing_name is not None else ""
             existing_area = float(existing_area) if existing_area is not None else None
             if index < len(expected_spaces):
@@ -989,6 +1012,7 @@ def check_master_room_list_space_type_table_match(sim_text: str, workbook_path: 
             "target_sheet": "Master Room List",
             "target_table": "Space Type Table",
             "writer": "openpyxl",
+            "rows_available": rows_available,
             "rows_checked": compared_rows,
             "spaces_compared": len(expected_spaces),
             "space_type_table_match": len(mismatches) == 0,
@@ -1001,14 +1025,14 @@ def check_master_room_list_space_type_table_match(sim_text: str, workbook_path: 
         raise ValueError("Workbook sheet is missing sheetData.")
     mismatches: List[Dict[str, object]] = []
     compared_rows = 0
-    for index in range(MASTER_ROOM_LIST_SPACE_MAX_ROWS):
-        row_number = MASTER_ROOM_LIST_SPACE_START_ROW + index
+    for index in range(rows_available):
+        row_number = (table_start_row + 1) + index
         row = sheet_data.find(f"m:row[@r='{row_number}']", NS)
         existing_name = ""
         existing_area = None
         if row is not None:
-            existing_name = _read_cell_text(row, f"D{row_number}").strip()
-            existing_area = _read_cell_float(row, f"G{row_number}")
+            existing_name = _read_cell_text(row, f"{name_col}{row_number}").strip()
+            existing_area = _read_cell_float(row, f"{area_col}{row_number}")
         if index < len(expected_spaces):
             expected_name, expected_space_data = expected_spaces[index]
             expected_area = float(expected_space_data["area_sqft"])
@@ -1028,6 +1052,7 @@ def check_master_room_list_space_type_table_match(sim_text: str, workbook_path: 
     return {
         "target_sheet": "Master Room List",
         "target_table": "Space Type Table",
+        "rows_available": rows_available,
         "rows_checked": compared_rows,
         "spaces_compared": len(expected_spaces),
         "space_type_table_match": len(mismatches) == 0,
@@ -1084,6 +1109,7 @@ def extract_es_d_energy_cost_summary(sim_text: str) -> Dict[str, object]:
         except ValueError:
             continue
         utility_rates[utility_rate] = {
+            "resource": parts[1],
             "unit": unit,
             "total_charge": total_charge,
             "total_charge_unit": "$",
