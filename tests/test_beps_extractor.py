@@ -225,6 +225,7 @@ class TestBepsExtractor(unittest.TestCase):
             i16 = sheet.find(".//m:c[@r='I16']/m:v", ns)
             j16 = sheet.find(".//m:c[@r='J16']/m:v", ns)
             k16 = sheet.find(".//m:c[@r='K16']", ns)
+            l16 = sheet.find(".//m:c[@r='L16']/m:v", ns)
             self.assertIsNotNone(d16)
             self.assertEqual(d16.attrib.get("t"), "inlineStr")
             d16_text = "".join(node.text or "" for node in d16.iter("{http://schemas.openxmlformats.org/spreadsheetml/2006/main}t"))
@@ -238,10 +239,14 @@ class TestBepsExtractor(unittest.TestCase):
                 c.attrib.get("name", "")
                 for c in master_table.findall(".//{http://schemas.openxmlformats.org/spreadsheetml/2006/main}tableColumn")
             ]
-            if "Temperature Setpoint (Setback / Set) F" in table_columns:
+            if "Temperature Setpoint (F)" in table_columns:
                 self.assertIsNotNone(k16)
-                k16_text = "".join(node.text or "" for node in k16.iter("{http://schemas.openxmlformats.org/spreadsheetml/2006/main}t"))
-                self.assertEqual(k16_text, "70 / 74")
+                k16_value = k16.find("{http://schemas.openxmlformats.org/spreadsheetml/2006/main}v")
+                self.assertIsNotNone(k16_value)
+                self.assertEqual(float(k16_value.text), 74.0)
+            if "Temperature Setback (F)" in table_columns:
+                self.assertIsNotNone(l16)
+                self.assertEqual(float(l16.text), 70.0)
             b2 = utility_sheet.find(".//m:c[@r='B2']", ns)
             c2 = utility_sheet.find(".//m:c[@r='C2']", ns)
             d2 = utility_sheet.find(".//m:c[@r='D2']", ns)
