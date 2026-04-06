@@ -35,20 +35,7 @@ LV_D_COLUMNS = [
     "avg_u_value_walls",
     "avg_u_value_walls_plus_windows",
     "window_area",
-    "wall_area",
-    "window_plus_wall_area",
-]
-LV_D_UNITS = {
-    "avg_u_value_windows": "BTU/HR-SQFT-F",
-    "avg_u_value_walls": "BTU/HR-SQFT-F",
-    "avg_u_value_walls_plus_windows": "BTU/HR-SQFT-F",
-    "window_area": "SQFT",
-    "wall_area": "SQFT",
-    "window_plus_wall_area": "SQFT",
-}
-LV_D_TARGET_ORIENTATIONS = {
-    "NORTH",
-    "NORTH-EAST",
+@@ -52,89 +52,106 @@ LV_D_TARGET_ORIENTATIONS = {
     "EAST",
     "SOUTH-EAST",
     "SOUTH",
@@ -143,78 +130,19 @@ def _parse_values_line(line: str) -> tuple[str, List[float]]:
             f"Expected {len(END_USE_COLUMNS)} numeric BEPS columns but found {len(numbers)} in line: {line!r}"
         )
     return unit, numbers
-            "usage": "Use convert_value(value, from_unit, to_unit, conversions) for future transformations.",
-    }
-def convert_value(value: float, from_unit: str, to_unit: str, conversions: Dict[str, Dict[str, float]]) -> float:
-    """Convert a value between units using LV-M conversion factors (supports chained conversions)."""
-    if from_unit == to_unit:
-        return value
-    visited = set()
-    queue: List[tuple[str, float]] = [(from_unit, value)]
-    while queue:
-        current_unit, current_value = queue.pop(0)
-        if current_unit in visited:
+
+
+def detect_available_reports(sim_text: str) -> Dict[str, object]:
+    """Return discovered REPORT-* identifiers from a SIM file."""
+    discovered = []
+    seen = set()
+    for line in sim_text.splitlines():
+        match = REPORT_HEADER_PATTERN.search(line)
+        if not match:
             continue
-        visited.add(current_unit)
-        for next_unit, factor in conversions.get(current_unit, {}).items():
-            next_value = current_value * factor
-            if next_unit == to_unit:
-                return next_value
-            if next_unit not in visited:
-                queue.append((next_unit, next_value))
-    raise ValueError(f"No conversion path found from '{from_unit}' to '{to_unit}'.")
-
-
-def _ensure_row(sheet_data: ET.Element, row_number: int) -> ET.Element:
-    row = sheet_data.find(f"m:row[@r='{row_number}']", NS)
-    if row is not None:
-        return row
-    row = ET.Element(f"{{{MAIN_NS}}}row", {"r": str(row_number)})
-    inserted = False
-    for existing in sheet_data.findall("m:row", NS):
-        if int(existing.attrib["r"]) > row_number:
-            sheet_data.insert(list(sheet_data).index(existing), row)
-            inserted = True
-            break
-    if not inserted:
-        sheet_data.append(row)
-    return row
-
-
-def _set_inline_string_cell(row: ET.Element, cell_ref: str, value: str, style: str | None = None) -> None:
-    cell = row.find(f"m:c[@r='{cell_ref}']", NS)
-    if cell is None:
-        attrs = {"r": cell_ref}
-        if style is not None:
-            attrs["s"] = style
-        cell = ET.SubElement(row, f"{{{MAIN_NS}}}c", attrs)
-    elif style is not None and "s" not in cell.attrib:
-        cell.attrib["s"] = style
-    for child in list(cell):
-        cell.remove(child)
-    cell.attrib["t"] = "inlineStr"
-    is_node = ET.SubElement(cell, f"{{{MAIN_NS}}}is")
-    text_node = ET.SubElement(is_node, f"{{{MAIN_NS}}}t")
-    text_node.text = value
-
-
-def _set_numeric_cell(row: ET.Element, cell_ref: str, value: float | None, style: str | None = None) -> None:
-    cell = row.find(f"m:c[@r='{cell_ref}']", NS)
-    if cell is None:
-        attrs = {"r": cell_ref}
-        if style is not None:
-            attrs["s"] = style
-        cell = ET.SubElement(row, f"{{{MAIN_NS}}}c", attrs)
-    elif style is not None and "s" not in cell.attrib:
-        cell.attrib["s"] = style
-    for child in list(cell):
-        cell.remove(child)
-    cell.attrib.pop("t", None)
-    if value is not None:
-        v_node = ET.SubElement(cell, f"{{{MAIN_NS}}}v")
-        v_node.text = f"{value:.6f}".rstrip("0").rstrip(".")
-
-
+        report_id = match.group(1).upper()
+        if report_id in seen:
+@@ -556,297 +573,405 @@ def _set_numeric_cell(row: ET.Element, cell_ref: str, value: float | None, style
 def _load_zip_file_map(workbook_path: Path) -> Dict[str, bytes]:
     with zipfile.ZipFile(workbook_path, "r") as workbook_zip:
         return {name: workbook_zip.read(name) for name in workbook_zip.namelist()}
@@ -620,224 +548,7 @@ def check_master_room_list_space_type_table_match(sim_text: str, workbook_path: 
                 compared_rows += 1
                 name_matches = existing_name == expected_name
                 area_matches = existing_area is not None and abs(existing_area - expected_area) < 1e-6
-                if not (name_matches and area_matches):
-                    mismatches.append(
-                        {
-                            "row": row_number,
-                            "expected_space_name": expected_name,
-                            "existing_space_name": existing_name,
-                            "expected_area_sqft": expected_area,
-                            "existing_area_sqft": existing_area,
-                        }
-                    )
-        return {
-            "target_sheet": "Master Room List",
-            "target_table": "Space Type Table",
-            "writer": "openpyxl",
-            "rows_checked": compared_rows,
-            "spaces_compared": len(expected_spaces),
-            "space_type_table_match": len(mismatches) == 0,
-            "mismatch_count": len(mismatches),
-            "mismatches": mismatches,
-        }
-    sheet_root = _load_master_room_list_sheet(workbook_path)
-    sheet_data = sheet_root.find("m:sheetData", NS)
-    if sheet_data is None:
-        raise ValueError("Workbook sheet is missing sheetData.")
-    mismatches: List[Dict[str, object]] = []
-    compared_rows = 0
-    for index in range(MASTER_ROOM_LIST_SPACE_MAX_ROWS):
-        row_number = MASTER_ROOM_LIST_SPACE_START_ROW + index
-        row = sheet_data.find(f"m:row[@r='{row_number}']", NS)
-        existing_name = ""
-        existing_area = None
-        if row is not None:
-            existing_name = _read_cell_text(row, f"D{row_number}").strip()
-            existing_area = _read_cell_float(row, f"G{row_number}")
-        if index < len(expected_spaces):
-                        expected_name, expected_space_data = expected_spaces[index]
-            expected_area = float(expected_space_data["area_sqft"])
-            compared_rows += 1
-            name_matches = existing_name == expected_name
-            area_matches = existing_area is not None and abs(existing_area - expected_area) < 1e-6
-            if not (name_matches and area_matches):
-                mismatches.append(
-                    {
-                        "row": row_number,
-                        "expected_space_name": expected_name,
-                        "existing_space_name": existing_name,
-                        "expected_area_sqft": expected_area,
-                        "existing_area_sqft": existing_area,
-                    }
-                )
-    return {
-        "target_sheet": "Master Room List",
-        "target_table": "Space Type Table",
-        "rows_checked": compared_rows,
-        "spaces_compared": len(expected_spaces),
-        "space_type_table_match": len(mismatches) == 0,
-        "mismatch_count": len(mismatches),
-        "mismatches": mismatches,
-    }
-
-
-def resolve_model_run_type(cli_model_run_type: str | None) -> str:
-    """Resolve model run type from CLI first, then environment, defaulting to Baseline."""
-    if cli_model_run_type and cli_model_run_type.strip():
-        return cli_model_run_type.strip()
-    env_value = os.getenv("MODEL_RUN_TYPE", "").strip()
-    if env_value:
-        return env_value
-    return "Baseline"
-def extract_es_d_energy_cost_summary(sim_text: str) -> Dict[str, object]:
-    """Extract utility-rate virtual rate, metered unit, and total charge from ES-D."""
-    lines = sim_text.splitlines()
-    in_esd = False
-    utility_rates: Dict[str, Dict[str, object]] = {}
-    for raw_line in lines:
-        stripped = raw_line.strip()
-        upper = stripped.upper()
-        if "REPORT- ES-D" in upper:
-            in_esd = True
-            continue
-        if in_esd and upper.startswith("REPORT-") and "REPORT- ES-D" not in upper:
-            in_esd = False
-        if not in_esd:
-            continue
-        if (
-            not stripped
-            or upper.startswith("UTILITY-RATE")
-            or upper.startswith("METERED")
-            or upper.startswith("ENERGY COST/")
-            or set(stripped) <= {"-", "=", "+"}
-        ):
-            continue
-        parts = [part.strip() for part in re.split(r"\s{2,}", stripped) if part.strip()]
-        if len(parts) < 6:
-            continue
-        utility_rate = parts[0]
-        metered_energy = parts[-4]
-        total_charge_str = parts[-3]
-        virtual_rate_str = parts[-2]
-        metered_tokens = metered_energy.split()
-        if len(metered_tokens) < 2:
-            continue
-        unit = metered_tokens[-1]
-        try:
-            total_charge = float(total_charge_str.replace(",", ""))
-            virtual_rate = float(virtual_rate_str.replace(",", ""))
-        except ValueError:
-            continue
-        utility_rates[utility_rate] = {
-            "unit": unit,
-            "total_charge": total_charge,
-            "total_charge_unit": "$",
-            "virtual_rate": virtual_rate,
-            "virtual_rate_unit": "$/Unit",
-        }
-    if not utility_rates:
-        raise ValueError("Could not parse ES-D utility-rate rows from the SIM file.")
-    return {
-        "report": "ES-D",
-        "utility_rates": utility_rates,
-    }
-def extract_ps_h_details(sim_text: str) -> Dict[str, object]:
-    """Extract PS-H loop, pump, and equipment sizing details."""
-    lines = sim_text.splitlines()
-    loops: Dict[str, Dict[str, object]] = {}
-    pumps: Dict[str, Dict[str, object]] = {}
-    equipment: Dict[str, Dict[str, object]] = {}
-    report_indices = [i for i, line in enumerate(lines) if "REPORT- PS-H" in line.upper()]
-    for start in report_indices:
-        line = lines[start]
-        name_match = re.search(r"REPORT-\s*PS-H\s+Loads and Energy Usage for\s+(.+?)\s+WEATHER FILE", line, re.IGNORECASE)
-        if not name_match:
-            continue
-        report_name = " ".join(name_match.group(1).split())
-        end = len(lines)
-        for j in range(start + 1, len(lines)):
-            if lines[j].strip().upper().startswith("REPORT-"):
-                end = j
-                break
-        block = lines[start:end]
-        block_text = "\n".join(block)
-        if "DETAILED SIZING INFORMATION" in block_text:
-            units_line_idx = next((i for i, b in enumerate(block) if "(MBTU/HR)" in b and "(HOURS)" in b and "(BTU/BTU)" in b), None)
-            if units_line_idx is not None:
-                units = re.findall(r"\(([^\)]+)\)", block[units_line_idx])
-                row = None
-                for k in range(units_line_idx + 1, min(units_line_idx + 20, len(block))):
-                    if "----" in block[k]:
-                        continue
-                    parts = [part.strip() for part in re.split(r"\s{2,}", block[k].strip()) if part.strip()]
-                    if len(parts) >= 8 and re.fullmatch(r"-?\d+(?:\.\d+)?", parts[1]):
-                        row = parts
-                        break
-                if row:
-                    equipment[report_name] = {
-                        "capacity": float(row[1]),
-                        "start_up": float(row[2]),
-                        "electric": float(row[3]),
-                        "heat_eir": float(row[4]),
-                        "aux_elec": float(row[5]),
-                        "fuel": float(row[6]),
-                        "heat_hir": float(row[7]),
-                        "units": {
-                            "capacity": units[0] if len(units) > 0 else "MBTU/HR",
-                            "start_up": units[1] if len(units) > 1 else "HOURS",
-                            "electric": units[2] if len(units) > 2 else "KW",
-                            "heat_eir": units[3] if len(units) > 3 else "BTU/BTU",
-                            "aux_elec": units[4] if len(units) > 4 else "KW",
-                            "fuel": units[5] if len(units) > 5 else "MBTU/HR",
-                            "heat_hir": units[6] if len(units) > 6 else "BTU/BTU",
-                        },
-                    }
-        elif "HEATING     COOLING      LOOP" in block_text:
-            # first PS-H loop instance table at top
-            units_line_idx = next((i for i, b in enumerate(block) if "(MBTU/HR)" in b and "(GPM" in b and "(FT)" in b), None)
-            if units_line_idx is None:
-                continue
-            units = re.findall(r"\(([^\)]+)\)", block[units_line_idx])
-            value_parts = None
-            for k in range(units_line_idx + 1, min(units_line_idx + 12, len(block))):
-                candidate = block[k].strip()
-                if not candidate or '----' in candidate:
-                    continue
-                parts = candidate.split()
-                if len(parts) >= 10 and all(re.fullmatch(r"-?\d+(?:\.\d+)?", p) for p in parts[:10]):
-                    value_parts = parts[:10]
-                    break
-            if value_parts:
-                loops[report_name] = {
-                    "heating_capacity": float(value_parts[0]),
-                    "cooling_capacity": float(value_parts[1]),
-                    "loop_flow": float(value_parts[2]),
-                    "total_head": float(value_parts[3]),
-                    "loop_volume": float(value_parts[8]),
-                    "units": {
-                        "heating_capacity": units[0] if len(units) > 0 else "MBTU/HR",
-                        "cooling_capacity": units[1] if len(units) > 1 else "MBTU/HR",
-                        "loop_flow": units[2] if len(units) > 2 else "GPM",
-                        "total_head": units[3] if len(units) > 3 else "FT",
-                        "loop_volume": units[8] if len(units) > 8 else "GAL",
-                    },
-                }
-        elif "CAPACITY               MECHANICAL" in block_text and "ATTACHED TO" in block_text:
-            header_idx = next((i for i, b in enumerate(block) if "ATTACHED TO" in b and "(GPM" in b and "(KW)" in b), None)
-            if header_idx is None:
-                continue
-            units_line = block[header_idx]
-            units = re.findall(r"\(([^\)]+)\)", units_line)
-            row = None
-            for k in range(header_idx + 1, min(header_idx + 12, len(block))):
-                candidate = block[k].strip()
-                if not candidate or '----' in candidate:
-                    continue
-                parts = [part.strip() for part in re.split(r"\s{2,}", candidate) if part.strip()]
-                if len(parts) >= 8 and re.fullmatch(r"-?\d+(?:\.\d+)?", parts[1]):
-                    row = parts
-                    break
-            if row:
+@@ -1071,147 +1196,362 @@ def extract_ps_h_details(sim_text: str) -> Dict[str, object]:
                 pumps[report_name] = {
                     "attached_to": row[0],
                     "flow": float(row[1]),
