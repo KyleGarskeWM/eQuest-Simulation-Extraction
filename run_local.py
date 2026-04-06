@@ -37,6 +37,15 @@ def build_command(config: dict) -> list[str]:
                 config["output_workbook_path"],
             ]
         )
+    elif mode == "schedule_importer":
+        command.extend(
+            [
+                "--populate-schedules",
+                config["workbook_path"],
+                "--output-workbook",
+                config["output_workbook_path"],
+            ]
+        )
     elif mode == "combined":
         raise ValueError("Use build_combined_commands() for mode='combined'.")
     else:
