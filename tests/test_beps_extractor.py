@@ -15,7 +15,10 @@ from equest_extractor import (
     extract_lv_d_report,
     extract_lv_i_constructions,
     extract_lv_m_conversions,
+    extract_schedule_table,
+    extract_hourly_thermostat_setpoint_ranges,
     populate_master_room_list_space_type_table,
+    populate_equest_schedule_importer_table,
     populate_ecm_data_from_reports,
     resolve_model_run_type,
     extract_es_d_energy_cost_summary,
@@ -50,6 +53,16 @@ class TestBepsExtractor(unittest.TestCase):
             }
         )
         self.assertIn("--update-ecm-data", ecm_command)
+
+        schedule_command = build_command(
+            {
+                "sim_file": "a.sim",
+                "mode": "schedule_importer",
+                "workbook_path": "b.xlsm",
+                "output_workbook_path": "c.xlsm",
+            }
+        )
+        self.assertIn("--populate-schedules", schedule_command)
 
     def test_extracts_all_beps_columns_and_totals_by_fuel(self):
         sim_text = """
@@ -167,9 +180,29 @@ class TestBepsExtractor(unittest.TestCase):
         self.assertEqual(result["equipment"]["HW Boiler 1"]["heat_hir"], 1.3333)
 
     def test_populates_master_room_list_space_type_table(self):
-        sim_path = Path("St Anselm Baseline ABS_Rev_0 - Baseline Design.SIM")
-        workbook_path = Path("Building Performance Assumptions.xlsm")
-        sim_text = sim_path.read_text(errors="ignore")
+        workbook_path = Path("output_files/Building Performance Assumptions-v2.xlsm")
+        sim_text = """
+        REPORT- LV-B Summary of Spaces
+        Spaces on floor: Level 1
+        010-Bike Storage                     1.0   INT   89.4    0.80    1.0    0.50   AIR-CHANGE  0.10      1038.1      12457.7
+        015-corridor                         1.0   INT    0.0    0.83    0.6    0.20   AIR-CHANGE  0.10       634.8       7617.4
+        CONDITIONED FLOOR AREA          =     107479.2  SQFT
+        REPORT- HOURLY
+        SPACE: 010-Bike Storage
+        HOUR  THERMOSTAT SETPOINT F  OTHER
+        1     70                     0
+        2     74                     0
+
+        SPACE: 015-corridor
+        HOUR  THERMOSTAT SETPOINT F  OTHER
+        1     68                     0
+        2     72                     0
+        REPORT- ES-D Energy Cost Summary
+        UTILITY-RATE                       RESOURCE           METERS              UNITS/YR               ($)     ($/UNIT)   ALL YEAR?
+        Elec                               ELECTRICITY        EM1   COMM       636613. KWH           108224.       0.1700      YES
+        Gas                                NATURAL-GAS        FM1               50910. THERM          59056.       1.1600      YES
+        REPORT- LS-A
+        """
         lv_b_result = extract_lv_b_spaces(sim_text)
         first_space_name, first_space_data = next(iter(lv_b_result["spaces"].items()))
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -179,19 +212,48 @@ class TestBepsExtractor(unittest.TestCase):
                 workbook_path=workbook_path,
                 output_workbook_path=output_path,
             )
-            self.assertEqual(result["spaces_written"], 50)
+            self.assertEqual(result["spaces_written"], 2)
             with zipfile.ZipFile(output_path, "r") as workbook_zip:
                 sheet_payload = workbook_zip.read("xl/worksheets/sheet1.xml")
                 sheet = ET.fromstring(sheet_payload)
+                utility_sheet = ET.fromstring(workbook_zip.read("xl/worksheets/sheet7.xml"))
+                master_table = ET.fromstring(workbook_zip.read("xl/tables/table2.xml"))
             ns = {"m": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
             d16 = sheet.find(".//m:c[@r='D16']", ns)
             g16 = sheet.find(".//m:c[@r='G16']/m:v", ns)
+            h16 = sheet.find(".//m:c[@r='H16']/m:v", ns)
+            i16 = sheet.find(".//m:c[@r='I16']/m:v", ns)
+            j16 = sheet.find(".//m:c[@r='J16']/m:v", ns)
+            k16 = sheet.find(".//m:c[@r='K16']", ns)
             self.assertIsNotNone(d16)
             self.assertEqual(d16.attrib.get("t"), "inlineStr")
             d16_text = "".join(node.text or "" for node in d16.iter("{http://schemas.openxmlformats.org/spreadsheetml/2006/main}t"))
             self.assertEqual(d16_text, first_space_name)
             self.assertIsNotNone(g16)
             self.assertAlmostEqual(float(g16.text), float(first_space_data["area_sqft"]))
+            self.assertAlmostEqual(float(h16.text), float(first_space_data["lights_w_per_sqft"]))
+            self.assertAlmostEqual(float(i16.text), float(first_space_data["equip_w_per_sqft"]))
+            self.assertAlmostEqual(float(j16.text), float(first_space_data["people"]))
+            table_columns = [
+                c.attrib.get("name", "")
+                for c in master_table.findall(".//{http://schemas.openxmlformats.org/spreadsheetml/2006/main}tableColumn")
+            ]
+            if "Temperature Setpoint (Setback / Set) F" in table_columns:
+                self.assertIsNotNone(k16)
+                k16_text = "".join(node.text or "" for node in k16.iter("{http://schemas.openxmlformats.org/spreadsheetml/2006/main}t"))
+                self.assertEqual(k16_text, "70 / 74")
+            b2 = utility_sheet.find(".//m:c[@r='B2']", ns)
+            c2 = utility_sheet.find(".//m:c[@r='C2']", ns)
+            d2 = utility_sheet.find(".//m:c[@r='D2']", ns)
+            self.assertIsNotNone(b2)
+            self.assertIsNotNone(c2)
+            self.assertIsNotNone(d2)
+            b2_text = "".join(node.text or "" for node in b2.iter("{http://schemas.openxmlformats.org/spreadsheetml/2006/main}t"))
+            c2_text = "".join(node.text or "" for node in c2.iter("{http://schemas.openxmlformats.org/spreadsheetml/2006/main}t"))
+            d2_value = d2.find("{http://schemas.openxmlformats.org/spreadsheetml/2006/main}v")
+            self.assertEqual(b2_text, "Electrical")
+            self.assertEqual(c2_text.upper(), "KWH")
+            self.assertAlmostEqual(float(d2_value.text), 0.17, places=4)
             d66 = sheet.find(".//m:c[@r='D66']", ns)
             if d66 is not None:
                 d66_text = "".join(node.text or "" for node in d66.iter("{http://schemas.openxmlformats.org/spreadsheetml/2006/main}t"))
@@ -258,8 +320,14 @@ class TestBepsExtractor(unittest.TestCase):
                 os.environ["MODEL_RUN_TYPE"] = old_value
 
     def test_populate_ecm_data_from_reports_for_ecm1(self):
-        sim_text = Path("St Anselm Baseline ABS_Rev_0 - Baseline Design.SIM").read_text(errors="ignore")
-        workbook_path = Path("Building Performance Assumptions.xlsm")
+        sim_text = """
+        REPORT- BEPS Building Energy Performance
+        COMM ELECTRICITY
+            MBTU          0.0      0.0     51.6      0.0      0.0      0.0     43.3      0.0      0.0      0.0      0.0     10.9     105.8
+        FM1  NATURAL-GAS
+            MBTU          0.0      0.0      0.0   2702.0      0.0      0.0      0.0      0.0      0.0      0.0   2389.0      0.0    5091.0
+        """
+        workbook_path = Path("output_files/Building Performance Assumptions-v2.xlsm")
         with tempfile.TemporaryDirectory() as temp_dir:
             output_path = Path(temp_dir) / "ecm_updated.xlsm"
             result = populate_ecm_data_from_reports(
@@ -268,25 +336,99 @@ class TestBepsExtractor(unittest.TestCase):
                 model_run_type="ECM-1",
                 output_workbook_path=output_path,
             )
-            self.assertEqual(result["section_start_row"], 44)
+            self.assertEqual(result["target_table"], "ECMData_ECM1")
+            self.assertEqual(result["electrical_energy_row"], 29)
+            self.assertEqual(result["natural_gas_energy_row"], 31)
             self.assertEqual(result["left_blank_columns"], ["G", "I", "N", "O", "P", "R", "S", "T"])
-            self.assertGreater(result["total_electric_kbtu"], 0)
-            self.assertGreater(result["total_gas_kbtu"], 0)
             with zipfile.ZipFile(output_path, "r") as workbook_zip:
-                sheet = ET.fromstring(workbook_zip.read("xl/worksheets/sheet10.xml"))
+                sheet = ET.fromstring(workbook_zip.read("xl/worksheets/sheet11.xml"))
             ns = {"m": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
-            total_elec_cell = sheet.find(".//m:c[@r='B50']/m:v", ns)
-            total_gas_cell = sheet.find(".//m:c[@r='B51']/m:v", ns)
-            demand_cell = sheet.find(".//m:c[@r='B49']/m:v", ns)
-            self.assertIsNotNone(total_elec_cell)
-            self.assertIsNotNone(total_gas_cell)
-            self.assertAlmostEqual(float(total_elec_cell.text), result["total_electric_kbtu"], places=3)
-            self.assertAlmostEqual(float(total_gas_cell.text), result["total_gas_kbtu"], places=3)
+            elec_cell = sheet.find(".//m:c[@r='B29']/m:v", ns)
+            gas_cell = sheet.find(".//m:c[@r='B31']/m:v", ns)
+            demand_cell = sheet.find(".//m:c[@r='B30']/m:v", ns)
+            self.assertIsNotNone(elec_cell)
+            self.assertIsNotNone(gas_cell)
             # Demand row should be blanked.
             self.assertIsNone(demand_cell)
-            # Unmapped ECM columns should remain blank in the Energy Use row.
+            # Optional/unmapped columns should remain blank in the energy rows.
             for col in ["G", "I", "N", "O", "P", "R", "S", "T"]:
-                self.assertIsNone(sheet.find(f".//m:c[@r='{col}48']/m:v", ns))
+                self.assertIsNone(sheet.find(f".//m:c[@r='{col}29']/m:v", ns))
+                self.assertIsNone(sheet.find(f".//m:c[@r='{col}31']/m:v", ns))
+
+    def test_extract_schedule_table(self):
+        sim_text = """
+        REPORT- SCHEDULES
+        Schedule Name  Schedule Type  Sunday  Monday  Tuesday  Wednesday  Thursday  Friday  Saturday  Holiday  Weekday  Weekend  Holiday Check  1  2  3  4
+        Office Lights  FRACTION       WD      WD      WD       WD         WD        WD      WE        WE       WD       WE       YES            0  0  0  0
+        REPORT- END
+        """
+        result = extract_schedule_table(sim_text)
+        self.assertEqual(result["report"], "SCHEDULE")
+        self.assertEqual(len(result["rows"]), 1)
+        self.assertEqual(result["rows"][0]["Schedule Name"], "Office Lights")
+        self.assertEqual(result["rows"][0]["1"], "0")
+
+    def test_populate_schedule_importer_table(self):
+        sim_text = """
+        REPORT- SCHEDULES
+        Schedule Name  Schedule Type  Sunday  Monday  Tuesday  Wednesday  Thursday  Friday  Saturday  Holiday  Weekday  Weekend  Holiday Check  1  2  3  4  5  6  7  8  9  10  11  12  13  14  15  16  17  18  19  20  21  22  23  24
+        Office Lights  FRACTION       WD      WD      WD       WD         WD        WD      WE        WE       WD       WE       YES            0  0  0  0  0  0  0.2  0.5  0.8  1.0  1.0  1.0  1.0  1.0  1.0  1.0  0.8  0.6  0.5  0.4  0.2  0.1  0  0
+        REPORT- END
+        """
+        workbook_path = Path("output_files/Building Performance Assumptions-v2.xlsm")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "schedule_updated.xlsm"
+            result = populate_equest_schedule_importer_table(
+                sim_text=sim_text,
+                workbook_path=workbook_path,
+                output_workbook_path=output_path,
+            )
+            self.assertEqual(result["target_table"], "eQuest_Schedule_Importer")
+            self.assertEqual(result["rows_written"], 1)
+            with zipfile.ZipFile(output_path, "r") as workbook_zip:
+                sheet = ET.fromstring(workbook_zip.read("xl/worksheets/sheet16.xml"))
+            ns = {"m": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+            a2 = sheet.find(".//m:c[@r='A2']", ns)
+            b2 = sheet.find(".//m:c[@r='B2']", ns)
+            n2 = sheet.find(".//m:c[@r='N2']/m:v", ns)
+            y2 = sheet.find(".//m:c[@r='Y2']/m:v", ns)
+            self.assertIsNotNone(a2)
+            self.assertIsNotNone(b2)
+            a2_text = "".join(node.text or "" for node in a2.iter("{http://schemas.openxmlformats.org/spreadsheetml/2006/main}t"))
+            b2_text = "".join(node.text or "" for node in b2.iter("{http://schemas.openxmlformats.org/spreadsheetml/2006/main}t"))
+            self.assertEqual(a2_text, "Office Lights")
+            self.assertEqual(b2_text, "FRACTION")
+            self.assertIsNotNone(n2)
+            self.assertIsNotNone(y2)
+            self.assertEqual(float(n2.text), 0.0)
+            self.assertEqual(float(y2.text), 1.0)
+
+    def test_extract_hourly_thermostat_setpoint_ranges(self):
+        sim_text = """
+        REPORT- HOURLY
+        SPACE: Office 101
+        HOUR  THERMOSTAT SETPOINT F  OTHER
+        1     68.0                   0
+        2     72.5                   0
+        3     70.0                   0
+
+        SPACE: Conference 200
+        HOUR  THERMOSTAT SETPOINT F  OTHER
+        1     66.0                   0
+        2     74.0                   0
+
+        SPACE: OFFICE-101
+        HOUR  THERMOSTAT SETPOINT F  OTHER
+        1     67.0                   0
+        2     73.0                   0
+        REPORT- END
+        """
+        result = extract_hourly_thermostat_setpoint_ranges(sim_text)
+        self.assertEqual(result["space_count"], 2)
+        self.assertEqual(result["spaces"]["Office 101"]["min_thermostat_setpoint_f"], 67.0)
+        self.assertEqual(result["spaces"]["Office 101"]["max_thermostat_setpoint_f"], 73.0)
+        self.assertEqual(result["spaces"]["Conference 200"]["min_thermostat_setpoint_f"], 66.0)
+        self.assertEqual(result["spaces"]["Conference 200"]["max_thermostat_setpoint_f"], 74.0)
 
 
 if __name__ == "__main__":
