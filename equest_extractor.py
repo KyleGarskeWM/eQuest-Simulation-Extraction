@@ -635,9 +635,30 @@ def _parse_xml_with_registered_namespaces(xml_payload: bytes) -> ET.Element:
     return ET.fromstring(xml_payload)
 
 
-def _remove_mc_ignorable(root: ET.Element) -> None:
-    """Remove mc:Ignorable to avoid invalid undeclared-prefix values after re-serialization."""
-    root.attrib.pop(f"{{{MC_NS}}}Ignorable", None)
+def _serialize_xml_preserving_ignorable_prefixes(root: ET.Element, original_xml_payload: bytes) -> bytes:
+    """Serialize XML while preserving xmlns declarations referenced by mc:Ignorable."""
+    namespaces: Dict[str, str] = {}
+    for _, ns in ET.iterparse(io.BytesIO(original_xml_payload), events=("start-ns",)):
+        prefix, uri = ns
+        namespaces[prefix or ""] = uri
+    serialized_xml = ET.tostring(root, encoding="utf-8", xml_declaration=True).decode("utf-8")
+    ignorable_value = root.attrib.get(f"{{{MC_NS}}}Ignorable", "")
+    ignorable_prefixes = [prefix for prefix in ignorable_value.split() if prefix]
+    if not ignorable_prefixes:
+        return serialized_xml.encode("utf-8")
+    root_tag_end = serialized_xml.find(">")
+    if root_tag_end == -1:
+        return serialized_xml.encode("utf-8")
+    root_start = serialized_xml[:root_tag_end]
+    root_end = serialized_xml[root_tag_end:]
+    for prefix in ignorable_prefixes:
+        if f"xmlns:{prefix}=" in root_start:
+            continue
+        uri = namespaces.get(prefix)
+        if not uri:
+            continue
+        root_start += f' xmlns:{prefix}="{uri}"'
+    return f"{root_start}{root_end}".encode("utf-8")
 
 
 def _to_kbtu(value: float, from_unit: str) -> float:
@@ -786,8 +807,10 @@ def _write_utility_rate_table_from_es_d(
     _set_inline_string_cell(row_3, "C3", "Therms")
     _set_numeric_cell(row_3, "D3", gas_virtual_rate)
     _set_numeric_cell(row_3, "E3", gas_virtual_rate / KBTU_PER_UNIT["THERM"])
-    _remove_mc_ignorable(utility_root)
-    file_map[UTILITY_RATES_SHEET_XML_PATH] = ET.tostring(utility_root, encoding="utf-8", xml_declaration=True)
+    file_map[UTILITY_RATES_SHEET_XML_PATH] = _serialize_xml_preserving_ignorable_prefixes(
+        utility_root,
+        file_map[UTILITY_RATES_SHEET_XML_PATH],
+    )
 
 
 def _apply_space_type_qaqc_model_run_status_openpyxl(sheet, model_run_type: str) -> int:
@@ -1011,10 +1034,14 @@ def populate_master_room_list_space_type_table(
     qaqc_status = bool(master_space_name_match)
     qaqc_status_row = _ensure_row(sheet_data, qaqc_row)
     _set_boolean_cell(qaqc_status_row, f"{SPACE_TYPE_QAQC_STATUS_COLUMN}{qaqc_row}", qaqc_status)
-    _remove_mc_ignorable(sheet_root)
-    _remove_mc_ignorable(raw_data_root)
-    file_map[MASTER_ROOM_LIST_SHEET_XML_PATH] = ET.tostring(sheet_root, encoding="utf-8", xml_declaration=True)
-    file_map[RAW_DATA_EQ_IMPORT_SHEET_XML_PATH] = ET.tostring(raw_data_root, encoding="utf-8", xml_declaration=True)
+    file_map[MASTER_ROOM_LIST_SHEET_XML_PATH] = _serialize_xml_preserving_ignorable_prefixes(
+        sheet_root,
+        file_map[MASTER_ROOM_LIST_SHEET_XML_PATH],
+    )
+    file_map[RAW_DATA_EQ_IMPORT_SHEET_XML_PATH] = _serialize_xml_preserving_ignorable_prefixes(
+        raw_data_root,
+        file_map[RAW_DATA_EQ_IMPORT_SHEET_XML_PATH],
+    )
     _write_utility_rate_table_from_es_d(file_map, es_d_result)
     _save_zip_file_map(file_map, output_workbook_path)
     return {
@@ -1146,8 +1173,10 @@ def populate_ecm_data_from_reports(
         _set_numeric_cell(elec_energy_row, f"{col}{elec_energy_row_number}", value)
     for col, value in gas_end_use_values_kbtu.items():
         _set_numeric_cell(gas_energy_row, f"{col}{gas_energy_row_number}", value)
-    _remove_mc_ignorable(sheet_root)
-    file_map[ECM_DATA_SHEET_XML_PATH] = ET.tostring(sheet_root, encoding="utf-8", xml_declaration=True)
+    file_map[ECM_DATA_SHEET_XML_PATH] = _serialize_xml_preserving_ignorable_prefixes(
+        sheet_root,
+        file_map[ECM_DATA_SHEET_XML_PATH],
+    )
     _save_zip_file_map(file_map, output_workbook_path)
     return {
         "sheet": "ECM Data",
@@ -1484,8 +1513,10 @@ def populate_equest_schedule_importer_table(
             value = row_data.get(str(hour))
             numeric_value = float(value) if value not in (None, "") else None
             _set_numeric_cell(row, f"{col}{row_number}", numeric_value)
-    _remove_mc_ignorable(sheet_root)
-    file_map[schedule_sheet_path] = ET.tostring(sheet_root, encoding="utf-8", xml_declaration=True)
+    file_map[schedule_sheet_path] = _serialize_xml_preserving_ignorable_prefixes(
+        sheet_root,
+        file_map[schedule_sheet_path],
+    )
     _save_zip_file_map(file_map, output_workbook_path)
     return {
         "target_sheet": "eQuest Schedule Importer",
