@@ -16,10 +16,9 @@ try:
 except ImportError:  # pragma: no cover - optional dependency for safer workbook writes
     load_workbook = None
 
-# Writing macro-enabled workbooks with openpyxl can cause Excel recovery/repair
-# issues in some templates (named ranges/tables/external refs). Prefer XML-level
-# patching for write flows so untouched workbook parts are preserved byte-for-byte.
-USE_OPENPYXL_FOR_WRITES = False
+# Prefer openpyxl writes for workbook update flows. XML-level rewriting proved
+# fragile for this template and can trigger Excel repair/recovery.
+USE_OPENPYXL_FOR_WRITES = True
 END_USE_COLUMNS = [
     "LIGHTS",
     "TASK LIGHTS",
@@ -81,6 +80,7 @@ LV_I_UVALUE_UNIT_PATTERN = re.compile(r"U-VALUE\s*\(([^\)]+)\)", re.IGNORECASE)
 LS_A_LOAD_UNIT_PATTERN = re.compile(r"COOLING LOAD\s*\(([^\)]+)\)", re.IGNORECASE)
 REPORT_HEADER_PATTERN = re.compile(r"REPORT-\s*([A-Z0-9\-]+)", re.IGNORECASE)
 MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+MC_NS = "http://schemas.openxmlformats.org/markup-compatibility/2006"
 NS = {"m": MAIN_NS}
 MASTER_ROOM_LIST_SHEET_XML_PATH = "xl/worksheets/sheet1.xml"
 MASTER_ROOM_LIST_SPACE_START_ROW = 16
@@ -634,6 +634,40 @@ def _parse_xml_with_registered_namespaces(xml_payload: bytes) -> ET.Element:
     return ET.fromstring(xml_payload)
 
 
+def _serialize_xml_preserving_ignorable_prefixes(root: ET.Element, original_xml_payload: bytes) -> bytes:
+    """Serialize XML while preserving xmlns declarations referenced by mc:Ignorable."""
+    namespaces: Dict[str, str] = {}
+    for _, ns in ET.iterparse(io.BytesIO(original_xml_payload), events=("start-ns",)):
+        prefix, uri = ns
+        namespaces[prefix or ""] = uri
+    serialized_xml = ET.tostring(root, encoding="utf-8", xml_declaration=True).decode("utf-8")
+    ignorable_value = root.attrib.get(f"{{{MC_NS}}}Ignorable", "")
+    ignorable_prefixes = [prefix for prefix in ignorable_value.split() if prefix]
+    if not ignorable_prefixes:
+        return serialized_xml.encode("utf-8")
+    declaration_end = 0
+    if serialized_xml.startswith("<?xml"):
+        declaration_close = serialized_xml.find("?>")
+        if declaration_close != -1:
+            declaration_end = declaration_close + 2
+    root_tag_start = serialized_xml.find("<", declaration_end)
+    if root_tag_start == -1:
+        return serialized_xml.encode("utf-8")
+    root_tag_end = serialized_xml.find(">", root_tag_start)
+    if root_tag_end == -1:
+        return serialized_xml.encode("utf-8")
+    root_start = serialized_xml[:root_tag_end]
+    root_end = serialized_xml[root_tag_end:]
+    for prefix in ignorable_prefixes:
+        if f"xmlns:{prefix}=" in root_start:
+            continue
+        uri = namespaces.get(prefix)
+        if not uri:
+            continue
+        root_start += f' xmlns:{prefix}="{uri}"'
+    return f"{root_start}{root_end}".encode("utf-8")
+
+
 def _to_kbtu(value: float, from_unit: str) -> float:
     normalized_unit = from_unit.upper().strip()
     if normalized_unit not in KBTU_PER_UNIT:
@@ -780,7 +814,10 @@ def _write_utility_rate_table_from_es_d(
     _set_inline_string_cell(row_3, "C3", "Therms")
     _set_numeric_cell(row_3, "D3", gas_virtual_rate)
     _set_numeric_cell(row_3, "E3", gas_virtual_rate / KBTU_PER_UNIT["THERM"])
-    file_map[UTILITY_RATES_SHEET_XML_PATH] = ET.tostring(utility_root, encoding="utf-8", xml_declaration=True)
+    file_map[UTILITY_RATES_SHEET_XML_PATH] = _serialize_xml_preserving_ignorable_prefixes(
+        utility_root,
+        file_map[UTILITY_RATES_SHEET_XML_PATH],
+    )
 
 
 def _apply_space_type_qaqc_model_run_status_openpyxl(sheet, model_run_type: str) -> int:
@@ -1004,8 +1041,14 @@ def populate_master_room_list_space_type_table(
     qaqc_status = bool(master_space_name_match)
     qaqc_status_row = _ensure_row(sheet_data, qaqc_row)
     _set_boolean_cell(qaqc_status_row, f"{SPACE_TYPE_QAQC_STATUS_COLUMN}{qaqc_row}", qaqc_status)
-    file_map[MASTER_ROOM_LIST_SHEET_XML_PATH] = ET.tostring(sheet_root, encoding="utf-8", xml_declaration=True)
-    file_map[RAW_DATA_EQ_IMPORT_SHEET_XML_PATH] = ET.tostring(raw_data_root, encoding="utf-8", xml_declaration=True)
+    file_map[MASTER_ROOM_LIST_SHEET_XML_PATH] = _serialize_xml_preserving_ignorable_prefixes(
+        sheet_root,
+        file_map[MASTER_ROOM_LIST_SHEET_XML_PATH],
+    )
+    file_map[RAW_DATA_EQ_IMPORT_SHEET_XML_PATH] = _serialize_xml_preserving_ignorable_prefixes(
+        raw_data_root,
+        file_map[RAW_DATA_EQ_IMPORT_SHEET_XML_PATH],
+    )
     _write_utility_rate_table_from_es_d(file_map, es_d_result)
     _save_zip_file_map(file_map, output_workbook_path)
     return {
@@ -1137,7 +1180,10 @@ def populate_ecm_data_from_reports(
         _set_numeric_cell(elec_energy_row, f"{col}{elec_energy_row_number}", value)
     for col, value in gas_end_use_values_kbtu.items():
         _set_numeric_cell(gas_energy_row, f"{col}{gas_energy_row_number}", value)
-    file_map[ECM_DATA_SHEET_XML_PATH] = ET.tostring(sheet_root, encoding="utf-8", xml_declaration=True)
+    file_map[ECM_DATA_SHEET_XML_PATH] = _serialize_xml_preserving_ignorable_prefixes(
+        sheet_root,
+        file_map[ECM_DATA_SHEET_XML_PATH],
+    )
     _save_zip_file_map(file_map, output_workbook_path)
     return {
         "sheet": "ECM Data",
@@ -1415,19 +1461,21 @@ def extract_ps_h_details(sim_text: str) -> Dict[str, object]:
 
 
 def extract_schedule_table(sim_text: str) -> Dict[str, object]:
-    """Extract REPORT- SCHEDULES rows into a table-like structure."""
+    """Extract schedule rows from REPORT- LV-G (or REPORT- SCHEDULES) into a table-like structure."""
     lines = sim_text.splitlines()
     in_schedules = False
+    report_name = None
     header: List[str] | None = None
     rows: List[Dict[str, str]] = []
     for raw_line in lines:
         stripped = raw_line.strip()
         upper = stripped.upper()
-        if "REPORT- SCHEDULES" in upper:
+        if "REPORT- LV-G" in upper or "REPORT- SCHEDULES" in upper:
             in_schedules = True
+            report_name = "LV-G" if "REPORT- LV-G" in upper else "SCHEDULE"
             header = None
             continue
-        if in_schedules and upper.startswith("REPORT-") and "REPORT- SCHEDULES" not in upper:
+        if in_schedules and upper.startswith("REPORT-") and "REPORT- LV-G" not in upper and "REPORT- SCHEDULES" not in upper:
             break
         if not in_schedules or not stripped:
             continue
@@ -1441,7 +1489,87 @@ def extract_schedule_table(sim_text: str) -> Dict[str, object]:
             continue
         row = {header[idx]: parts[idx] for idx in range(len(header))}
         rows.append(row)
-    return {"report": "SCHEDULE", "rows": rows}
+    if rows:
+        return {"report": report_name or "SCHEDULE", "rows": rows}
+    # Fallback parser for LV-G block-style schedules (SCHEDULE NAME/TYPE/FOR DAYS + hourly values).
+    in_lvg = False
+    block_rows: List[Dict[str, str]] = []
+    current: Dict[str, str] | None = None
+    for raw_line in lines:
+        stripped = raw_line.strip()
+        upper = stripped.upper()
+        if "REPORT- LV-G" in upper:
+            in_lvg = True
+            continue
+        if in_lvg and upper.startswith("REPORT-") and "REPORT- LV-G" not in upper:
+            in_lvg = False
+        if not in_lvg or not stripped:
+            continue
+        name_match = re.search(r"SCHEDULE\s+NAME\s*[:=]\s*(.+)$", stripped, re.IGNORECASE)
+        if name_match:
+            if current and current.get("Schedule Name"):
+                block_rows.append(current)
+            current = {"Schedule Name": name_match.group(1).strip(), "Schedule Type": ""}
+            continue
+        if current is None:
+            continue
+        type_match = re.search(r"SCHEDULE\s+TYPE\s*[:=]\s*(.+)$", stripped, re.IGNORECASE)
+        if type_match:
+            current["Schedule Type"] = type_match.group(1).strip()
+            continue
+        for_days_match = re.search(r"FOR\s+DAYS\s*[:=]\s*(.+)$", stripped, re.IGNORECASE)
+        if for_days_match:
+            current["FOR_DAYS"] = for_days_match.group(1).strip()
+            continue
+        hour_label_match = re.match(r"^\s*(\d{1,2})\s*(AM|PM)?\s*[:=]?\s*(-?\d+(?:\.\d+)?)\s*$", stripped, re.IGNORECASE)
+        if hour_label_match:
+            hour_num = int(hour_label_match.group(1))
+            if 1 <= hour_num <= 24:
+                current[str(hour_num)] = hour_label_match.group(3)
+            continue
+        if "VALUES" in upper or "HOURLY VALUES" in upper:
+            numeric_tokens = re.findall(r"-?\d+(?:\.\d+)?", stripped)
+            if len(numeric_tokens) >= 24:
+                for hour_idx in range(1, 25):
+                    current[str(hour_idx)] = numeric_tokens[hour_idx - 1]
+    if current and current.get("Schedule Name"):
+        block_rows.append(current)
+    return {"report": "LV-G" if block_rows else (report_name or "SCHEDULE"), "rows": block_rows}
+
+
+def _for_days_flags(for_days_value: str) -> Dict[str, str]:
+    text = (for_days_value or "").upper()
+    tokenized = text.replace(",", " ").replace("/", " ").replace("-", " ")
+    tokens = {token for token in tokenized.split() if token}
+    flags = {day: "" for day in ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]}
+    sunday_tokens = {"SUN", "SUNDAY"}
+    monday_tokens = {"MON", "MONDAY"}
+    tuesday_tokens = {"TUE", "TUES", "TUESDAY"}
+    wednesday_tokens = {"WED", "WEDNESDAY"}
+    thursday_tokens = {"THU", "THUR", "THURS", "THURSDAY"}
+    friday_tokens = {"FRI", "FRIDAY"}
+    saturday_tokens = {"SAT", "SATURDAY"}
+    if tokens.intersection(sunday_tokens):
+        flags["Sunday"] = "X"
+    if tokens.intersection(monday_tokens):
+        flags["Monday"] = "X"
+    if tokens.intersection(tuesday_tokens):
+        flags["Tuesday"] = "X"
+    if tokens.intersection(wednesday_tokens):
+        flags["Wednesday"] = "X"
+    if tokens.intersection(thursday_tokens):
+        flags["Thursday"] = "X"
+    if tokens.intersection(friday_tokens):
+        flags["Friday"] = "X"
+    if tokens.intersection(saturday_tokens):
+        flags["Saturday"] = "X"
+    if "WEEKDAY" in text or "WEEKDAYS" in text or "WKDAY" in text or "WKDAYS" in text:
+        for day in ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]:
+            flags[day] = "X"
+    if "WEEKEND" in text or "WEEKENDS" in text or "WKEND" in text or "WKENDS" in text:
+        flags["Sunday"] = "X"
+        flags["Saturday"] = "X"
+    return flags
 
 
 def populate_equest_schedule_importer_table(
@@ -1449,9 +1577,52 @@ def populate_equest_schedule_importer_table(
     workbook_path: Path,
     output_workbook_path: Path,
 ) -> Dict[str, object]:
-    """Populate the eQuest Schedule Importer tab from REPORT- SCHEDULES."""
+    """Populate the eQuest Schedule Importer tab from REPORT- LV-G schedule rows."""
     schedule_result = extract_schedule_table(sim_text)
     rows = schedule_result["rows"]
+    if USE_OPENPYXL_FOR_WRITES and load_workbook is not None:
+        workbook = load_workbook(workbook_path, keep_vba=True, keep_links=False)
+        sheet = workbook["eQuest Schedule Importer"]
+        start_row = 2
+        max_rows = 79
+        day_columns = {
+            "Sunday": "C",
+            "Monday": "D",
+            "Tuesday": "E",
+            "Wednesday": "F",
+            "Thursday": "G",
+            "Friday": "H",
+            "Saturday": "I",
+        }
+        for idx in range(max_rows):
+            row_number = start_row + idx
+            row_data = rows[idx] if idx < len(rows) else {}
+            sheet[f"A{row_number}"] = row_data.get("Schedule Name", "")
+            sheet[f"B{row_number}"] = row_data.get("Schedule Type", "")
+            day_flags = _for_days_flags(str(row_data.get("FOR_DAYS", "")))
+            for day_name, col in day_columns.items():
+                existing_day_value = str(row_data.get(day_name, "")).strip().upper()
+                if existing_day_value not in {"", "0", "N", "NO"}:
+                    day_flags[day_name] = "X"
+                sheet[f"{col}{row_number}"] = day_flags[day_name]
+            sheet[f"J{row_number}"] = "X" if str(row_data.get("Holiday", "")).strip().upper() not in {"", "0", "N", "NO"} else ""
+            sheet[f"K{row_number}"] = "X" if str(row_data.get("Weekday", "")).strip().upper() not in {"", "0", "N", "NO"} else ""
+            sheet[f"L{row_number}"] = "X" if str(row_data.get("Weekend", "")).strip().upper() not in {"", "0", "N", "NO"} else ""
+            sheet[f"M{row_number}"] = "X" if str(row_data.get("Holiday Check", "")).strip().upper() not in {"", "0", "N", "NO"} else ""
+            for hour in range(1, 25):
+                col = _excel_column_name(13 + hour)
+                hour_label = f"{hour} AM" if hour <= 11 else ("12 PM" if hour == 12 else ("24 AM" if hour == 24 else f"{hour} PM"))
+                value = row_data.get(str(hour), row_data.get(hour_label))
+                sheet[f"{col}{row_number}"] = float(value) if value not in (None, "") else None
+        workbook.save(output_workbook_path)
+        return {
+            "target_sheet": "eQuest Schedule Importer",
+            "target_table": "eQuest_Schedule_Importer",
+            "writer": "openpyxl",
+            "rows_written": min(len(rows), max_rows),
+            "rows_available": max_rows,
+            "output_workbook": str(output_workbook_path),
+        }
     ET.register_namespace("", MAIN_NS)
     file_map = _load_zip_file_map(workbook_path)
     schedule_sheet_path = "xl/worksheets/sheet16.xml"
@@ -1474,7 +1645,10 @@ def populate_equest_schedule_importer_table(
             value = row_data.get(str(hour))
             numeric_value = float(value) if value not in (None, "") else None
             _set_numeric_cell(row, f"{col}{row_number}", numeric_value)
-    file_map[schedule_sheet_path] = ET.tostring(sheet_root, encoding="utf-8", xml_declaration=True)
+    file_map[schedule_sheet_path] = _serialize_xml_preserving_ignorable_prefixes(
+        sheet_root,
+        file_map[schedule_sheet_path],
+    )
     _save_zip_file_map(file_map, output_workbook_path)
     return {
         "target_sheet": "eQuest Schedule Importer",
