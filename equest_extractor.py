@@ -16,10 +16,9 @@ try:
 except ImportError:  # pragma: no cover - optional dependency for safer workbook writes
     load_workbook = None
 
-# Writing macro-enabled workbooks with openpyxl can cause Excel recovery/repair
-# issues in some templates (named ranges/tables/external refs). Prefer XML-level
-# patching for write flows so untouched workbook parts are preserved byte-for-byte.
-USE_OPENPYXL_FOR_WRITES = False
+# Prefer openpyxl writes for workbook update flows. XML-level rewriting proved
+# fragile for this template and can trigger Excel repair/recovery.
+USE_OPENPYXL_FOR_WRITES = True
 END_USE_COLUMNS = [
     "LIGHTS",
     "TASK LIGHTS",
