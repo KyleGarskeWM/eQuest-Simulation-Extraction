@@ -1,0 +1,81 @@
+{
+  "type": "object",
+  "properties": {
+    "mode": {
+      "type": "string",
+      "enum": [
+        "extract_report",
+        "master_room_list",
+        "ecm_data",
+        "schedule_importer",
+        "combined"
+      ]
+    },
+    "sim_file": {
+      "type": "string"
+    },
+    "report": {
+      "type": "string"
+    },
+    "workbook_path": {
+      "type": "string"
+    },
+    "output_workbook_path": {
+      "type": "string"
+    },
+    "model_run_type": {
+      "type": "string",
+      "enum": [
+        "Baseline",
+        "Proposed",
+        "ECM-1",
+        "ECM-2",
+        "ECM-3",
+        "ECM-4",
+        "ECM-5",
+        "ECM-6",
+        "ECM-7"
+      ]
+    },
+    "graph_config_path": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "graph": {
+      "type": "object",
+      "properties": {
+        "client_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tenant_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "client_secret": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "user_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "required": [
+    "sim_file"
+  ],
+  "additionalProperties": true
+}
