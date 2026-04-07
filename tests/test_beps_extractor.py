@@ -435,6 +435,27 @@ class TestBepsExtractor(unittest.TestCase):
         self.assertEqual(result["spaces"]["Conference 200"]["min_thermostat_setpoint_f"], 66.0)
         self.assertEqual(result["spaces"]["Conference 200"]["max_thermostat_setpoint_f"], 74.0)
 
+    def test_extract_hourly_thermostat_setpoint_ranges_with_variant_headers(self):
+        sim_text = """
+        REPORT-HOURLY
+        SPACE= 010-Bike Storage
+        DATE HR  THERMOSTAT SETPOINT F  OTHER
+        1   1    70                     0
+        1   2    74                     0
+
+        SPACE=015-corridor
+        DATE HR  THERMOSTAT SETPOINT F  OTHER
+        1   1    68                     0
+        1   2    72                     0
+        REPORT- LS-A
+        """
+        result = extract_hourly_thermostat_setpoint_ranges(sim_text)
+        self.assertEqual(result["space_count"], 2)
+        self.assertEqual(result["spaces"]["010-Bike Storage"]["min_thermostat_setpoint_f"], 70.0)
+        self.assertEqual(result["spaces"]["010-Bike Storage"]["max_thermostat_setpoint_f"], 74.0)
+        self.assertEqual(result["spaces"]["015-corridor"]["min_thermostat_setpoint_f"], 68.0)
+        self.assertEqual(result["spaces"]["015-corridor"]["max_thermostat_setpoint_f"], 72.0)
+
 
 if __name__ == "__main__":
     unittest.main()

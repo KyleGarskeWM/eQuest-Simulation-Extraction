@@ -635,30 +635,38 @@ def extract_hourly_thermostat_setpoint_ranges(sim_text: str) -> Dict[str, object
     for raw_line in lines:
         stripped = raw_line.strip()
         upper = stripped.upper()
-        if "REPORT- HOURLY" in upper:
-            in_hourly = True
+        report_match = REPORT_HEADER_PATTERN.search(stripped)
+        if report_match:
+            in_hourly = report_match.group(1).upper() == "HOURLY"
             current_space_name = None
             continue
-        if in_hourly and upper.startswith("REPORT-") and "REPORT- HOURLY" not in upper:
-            in_hourly = False
-            current_space_name = None
         if not in_hourly or not stripped:
             continue
-        if upper.startswith("SPACE:"):
-            current_space_name = stripped.split(":", 1)[1].strip()
+        space_match = re.match(r"^SPACE\s*[:=]\s*(.+)$", stripped, re.IGNORECASE)
+        if space_match:
+            current_space_name = space_match.group(1).strip()
             canonical = _normalize_space_name(current_space_name)
             canonical_to_name.setdefault(canonical, current_space_name)
             setpoint_values_by_space.setdefault(canonical, [])
             continue
         if current_space_name is None:
             continue
-        if "THERMOSTAT SETPOINT" not in upper and not re.match(r"^\d+\s+", stripped):
+        if "THERMOSTAT SETPOINT" not in upper and not re.match(r"^\d+(?:\s+\d+){0,2}\s+", stripped):
             continue
         number_tokens = re.findall(r"-?\d+(?:\.\d+)?", stripped)
-        if len(number_tokens) < 2:
+        if len(number_tokens) < 1:
             continue
         try:
-            setpoint_value = float(number_tokens[1])
+            if (
+                len(number_tokens) >= 3
+                and 1 <= int(float(number_tokens[0])) <= 31
+                and 0 <= int(float(number_tokens[1])) <= 24
+            ):
+                setpoint_value = float(number_tokens[2])
+            elif len(number_tokens) >= 2 and 0 <= int(float(number_tokens[0])) <= 24:
+                setpoint_value = float(number_tokens[1])
+            else:
+                setpoint_value = float(number_tokens[0])
         except ValueError:
             continue
         canonical = _normalize_space_name(current_space_name)
