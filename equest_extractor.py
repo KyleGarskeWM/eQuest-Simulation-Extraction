@@ -1572,6 +1572,22 @@ def _for_days_flags(for_days_value: str) -> Dict[str, str]:
     return flags
 
 
+def _normalize_schedule_row(row_data: Dict[str, str]) -> Dict[str, str]:
+    """Normalize schedule row keys from different parser formats."""
+    normalized: Dict[str, str] = {}
+    for key, value in row_data.items():
+        canonical_key = str(key).strip()
+        canonical_key_upper = canonical_key.upper()
+        if canonical_key_upper == "SCHEDULE NAME":
+            canonical_key = "Schedule Name"
+        elif canonical_key_upper == "SCHEDULE TYPE":
+            canonical_key = "Schedule Type"
+        elif canonical_key_upper in {"FOR DAYS", "FOR_DAYS"}:
+            canonical_key = "FOR_DAYS"
+        normalized[canonical_key] = value
+    return normalized
+
+
 def populate_equest_schedule_importer_table(
     sim_text: str,
     workbook_path: Path,
@@ -1596,7 +1612,7 @@ def populate_equest_schedule_importer_table(
         }
         for idx in range(max_rows):
             row_number = start_row + idx
-            row_data = rows[idx] if idx < len(rows) else {}
+            row_data = _normalize_schedule_row(rows[idx]) if idx < len(rows) else {}
             sheet[f"A{row_number}"] = row_data.get("Schedule Name", "")
             sheet[f"B{row_number}"] = row_data.get("Schedule Type", "")
             day_flags = _for_days_flags(str(row_data.get("FOR_DAYS", "")))
@@ -1637,7 +1653,7 @@ def populate_equest_schedule_importer_table(
     for idx in range(max_rows):
         row_number = start_row + idx
         row = _ensure_row(sheet_data, row_number)
-        row_data = rows[idx] if idx < len(rows) else {}
+        row_data = _normalize_schedule_row(rows[idx]) if idx < len(rows) else {}
         _set_inline_string_cell(row, f"A{row_number}", row_data.get("Schedule Name", ""))
         _set_inline_string_cell(row, f"B{row_number}", row_data.get("Schedule Type", ""))
         for hour in range(1, 25):
