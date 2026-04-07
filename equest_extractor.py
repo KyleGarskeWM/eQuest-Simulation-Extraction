@@ -79,6 +79,21 @@ NS = {"m": MAIN_NS}
 MASTER_ROOM_LIST_SHEET_XML_PATH = "xl/worksheets/sheet1.xml"
 MASTER_ROOM_LIST_SPACE_START_ROW = 16
 MASTER_ROOM_LIST_SPACE_MAX_ROWS = 298
+SPACE_TYPE_QAQC_TABLE_START_ROW = 4
+SPACE_TYPE_QAQC_TABLE_END_ROW = 12
+SPACE_TYPE_QAQC_MODEL_RUN_COLUMN = "T"
+SPACE_TYPE_QAQC_STATUS_COLUMN = "U"
+SPACE_TYPE_QAQC_MODEL_ROW_MAP = {
+    "BASELINE": 4,
+    "PROPOSED": 5,
+    "ECM-1": 6,
+    "ECM-2": 7,
+    "ECM-3": 8,
+    "ECM-4": 9,
+    "ECM-5": 10,
+    "ECM-6": 11,
+    "ECM-7": 12,
+}
 UTILITY_RATES_SHEET_XML_PATH = "xl/worksheets/sheet7.xml"
 ECM_DATA_SHEET_XML_PATH = "xl/worksheets/sheet11.xml"
 ECM_DATA_MODEL_START_ROWS = {
@@ -721,22 +736,47 @@ def _write_utility_rate_table_from_es_d(
     file_map[UTILITY_RATES_SHEET_XML_PATH] = ET.tostring(utility_root, encoding="utf-8", xml_declaration=True)
 
 
+def _apply_space_type_qaqc_model_run_status_openpyxl(sheet, model_run_type: str) -> int:
+    normalized_model_run_type = model_run_type.strip().upper()
+    if normalized_model_run_type not in SPACE_TYPE_QAQC_MODEL_ROW_MAP:
+        raise ValueError(
+            "Unsupported model run type for Space_Type_QAQC. Supported: Baseline, Proposed, ECM-1..ECM-7."
+        )
+    target_row = SPACE_TYPE_QAQC_MODEL_ROW_MAP[normalized_model_run_type]
+    for row_number in range(SPACE_TYPE_QAQC_TABLE_START_ROW, SPACE_TYPE_QAQC_TABLE_END_ROW + 1):
+        sheet[f"{SPACE_TYPE_QAQC_STATUS_COLUMN}{row_number}"] = row_number == target_row
+    return target_row
+
+
+def _apply_space_type_qaqc_model_run_status_xml(sheet_data: ET.Element, model_run_type: str) -> int:
+    normalized_model_run_type = model_run_type.strip().upper()
+    if normalized_model_run_type not in SPACE_TYPE_QAQC_MODEL_ROW_MAP:
+        raise ValueError(
+            "Unsupported model run type for Space_Type_QAQC. Supported: Baseline, Proposed, ECM-1..ECM-7."
+        )
+    target_row = SPACE_TYPE_QAQC_MODEL_ROW_MAP[normalized_model_run_type]
+    for row_number in range(SPACE_TYPE_QAQC_TABLE_START_ROW, SPACE_TYPE_QAQC_TABLE_END_ROW + 1):
+        row = _ensure_row(sheet_data, row_number)
+        _set_boolean_cell(
+            row,
+            f"{SPACE_TYPE_QAQC_STATUS_COLUMN}{row_number}",
+            row_number == target_row,
+        )
+    return target_row
+
+
 def populate_master_room_list_space_type_table(
     sim_text: str,
     workbook_path: Path,
+    model_run_type: str,
     output_workbook_path: Path,
 ) -> Dict[str, object]:
-    """Populate Master Room List 'Space Type Table' and Utilities table from LV-B + HOURLY + ES-D."""
+    """Populate Master Room List 'Space Type Table' and Utilities table from LV-B + ES-D."""
     lv_b_result = extract_lv_b_spaces(sim_text)
-    hourly_result = extract_hourly_thermostat_setpoint_ranges(sim_text)
     try:
         es_d_result = extract_es_d_energy_cost_summary(sim_text)
     except ValueError:
         es_d_result = {"utility_rates": {}}
-    hourly_by_space = {
-        _normalize_space_name(space_name): values
-        for space_name, values in hourly_result["spaces"].items()
-    }
     spaces = list(lv_b_result["spaces"].items())
     if not spaces:
         raise ValueError("No LV-B spaces found to populate the Master Room List.")
@@ -750,22 +790,18 @@ def populate_master_room_list_space_type_table(
             row_number = start_row + index
             if index < len(spaces):
                 space_name, space_data = spaces[index]
-                thermostat_data = hourly_by_space.get(_normalize_space_name(space_name), {})
                 sheet[f"D{row_number}"] = space_name
                 sheet[f"G{row_number}"] = float(space_data["area_sqft"])
                 sheet[f"H{row_number}"] = float(space_data["lights_w_per_sqft"])
                 sheet[f"I{row_number}"] = float(space_data["equip_w_per_sqft"])
                 sheet[f"J{row_number}"] = float(space_data["people"])
-                sheet[f"K{row_number}"] = thermostat_data.get("max_thermostat_setpoint_f")
-                sheet[f"L{row_number}"] = thermostat_data.get("min_thermostat_setpoint_f")
             else:
                 sheet[f"D{row_number}"] = None
                 sheet[f"G{row_number}"] = None
                 sheet[f"H{row_number}"] = None
                 sheet[f"I{row_number}"] = None
                 sheet[f"J{row_number}"] = None
-                sheet[f"K{row_number}"] = None
-                sheet[f"L{row_number}"] = None
+        qaqc_row = _apply_space_type_qaqc_model_run_status_openpyxl(sheet, model_run_type)
         utility_rates = es_d_result["utility_rates"]
         elec_virtual_rate = next(
             float(data["virtual_rate"]) for data in utility_rates.values() if str(data["unit"]).upper() == "KWH"
@@ -791,6 +827,8 @@ def populate_master_room_list_space_type_table(
             "spaces_written": min(len(spaces), max_rows),
             "spaces_truncated": max(len(spaces) - max_rows, 0),
             "utilities_updated": True,
+            "space_type_qaqc_updated": True,
+            "space_type_qaqc_true_row": qaqc_row,
             "output_workbook": str(output_workbook_path),
         }
     ET.register_namespace("", MAIN_NS)
@@ -806,15 +844,11 @@ def populate_master_room_list_space_type_table(
     lpd_style_template = None
     epd_style_template = None
     occupancy_style_template = None
-    setpoint_style_template = None
-    setback_style_template = None
     text_template_cell = sheet_root.find(".//m:c[@r='E16']", NS)
     area_template_cell = sheet_root.find(".//m:c[@r='G16']", NS)
     lpd_template_cell = sheet_root.find(".//m:c[@r='H16']", NS)
     epd_template_cell = sheet_root.find(".//m:c[@r='I16']", NS)
     occupancy_template_cell = sheet_root.find(".//m:c[@r='J16']", NS)
-    setpoint_template_cell = sheet_root.find(".//m:c[@r='K16']", NS)
-    setback_template_cell = sheet_root.find(".//m:c[@r='L16']", NS)
     if text_template_cell is not None:
         text_style_template = text_template_cell.attrib.get("s")
     if area_template_cell is not None:
@@ -825,10 +859,6 @@ def populate_master_room_list_space_type_table(
         epd_style_template = epd_template_cell.attrib.get("s")
     if occupancy_template_cell is not None:
         occupancy_style_template = occupancy_template_cell.attrib.get("s")
-    if setpoint_template_cell is not None:
-        setpoint_style_template = setpoint_template_cell.attrib.get("s")
-    if setback_template_cell is not None:
-        setback_style_template = setback_template_cell.attrib.get("s")
     max_rows = MASTER_ROOM_LIST_SPACE_MAX_ROWS
     start_row = MASTER_ROOM_LIST_SPACE_START_ROW
     for index in range(max_rows):
@@ -839,36 +869,20 @@ def populate_master_room_list_space_type_table(
         lpd_ref = f"H{row_number}"
         epd_ref = f"I{row_number}"
         occupants_ref = f"J{row_number}"
-        setpoint_ref = f"K{row_number}"
-        setback_ref = f"L{row_number}"
         if index < len(spaces):
             space_name, space_data = spaces[index]
-            thermostat_data = hourly_by_space.get(_normalize_space_name(space_name), {})
             _set_inline_string_cell(row, name_ref, space_name, style=text_style_template)
             _set_numeric_cell(row, area_ref, float(space_data["area_sqft"]), style=area_style_template)
             _set_numeric_cell(row, lpd_ref, float(space_data["lights_w_per_sqft"]), style=lpd_style_template)
             _set_numeric_cell(row, epd_ref, float(space_data["equip_w_per_sqft"]), style=epd_style_template)
             _set_numeric_cell(row, occupants_ref, float(space_data["people"]), style=occupancy_style_template)
-            _set_numeric_cell(
-                row,
-                setpoint_ref,
-                thermostat_data.get("max_thermostat_setpoint_f"),
-                style=setpoint_style_template,
-            )
-            _set_numeric_cell(
-                row,
-                setback_ref,
-                thermostat_data.get("min_thermostat_setpoint_f"),
-                style=setback_style_template,
-            )
         else:
             _set_inline_string_cell(row, name_ref, "", style=text_style_template)
             _set_numeric_cell(row, area_ref, None, style=area_style_template)
             _set_numeric_cell(row, lpd_ref, None, style=lpd_style_template)
             _set_numeric_cell(row, epd_ref, None, style=epd_style_template)
             _set_numeric_cell(row, occupants_ref, None, style=occupancy_style_template)
-            _set_numeric_cell(row, setpoint_ref, None, style=setpoint_style_template)
-            _set_numeric_cell(row, setback_ref, None, style=setback_style_template)
+    qaqc_row = _apply_space_type_qaqc_model_run_status_xml(sheet_data, model_run_type)
     file_map[MASTER_ROOM_LIST_SHEET_XML_PATH] = ET.tostring(sheet_root, encoding="utf-8", xml_declaration=True)
     _write_utility_rate_table_from_es_d(file_map, es_d_result)
     _save_zip_file_map(file_map, output_workbook_path)
@@ -880,6 +894,8 @@ def populate_master_room_list_space_type_table(
         "spaces_written": min(len(spaces), max_rows),
         "spaces_truncated": max(len(spaces) - max_rows, 0),
         "utilities_updated": True,
+        "space_type_qaqc_updated": True,
+        "space_type_qaqc_true_row": qaqc_row,
         "output_workbook": str(output_workbook_path),
     }
 
@@ -1428,33 +1444,26 @@ def main() -> None:
         return
     if args.populate_master_room_list:
         model_run_type = resolve_model_run_type(args.model_run_type)
-        normalized_model_run_type = model_run_type.upper()
-        is_baseline = normalized_model_run_type == "BASELINE"
-        if is_baseline:
-            if not args.output_workbook:
-                raise ValueError("--output-workbook is required for Baseline when using --populate-master-room-list.")
-            result = populate_master_room_list_space_type_table(
-                sim_text=sim_text,
-                workbook_path=args.populate_master_room_list,
-                output_workbook_path=args.output_workbook,
-            )
-            result.update(
-                {
-                    "model_run_type": model_run_type,
-                    "is_baseline": True,
-                    "space_type_table_match": True,
-                }
-            )
-        else:
-            comparison_result = check_master_room_list_space_type_table_match(
-                sim_text=sim_text,
-                workbook_path=args.populate_master_room_list,
-            )
-            result = {
+        if not args.output_workbook:
+            raise ValueError("--output-workbook is required when using --populate-master-room-list.")
+        comparison_result = check_master_room_list_space_type_table_match(
+            sim_text=sim_text,
+            workbook_path=args.populate_master_room_list,
+        )
+        result = populate_master_room_list_space_type_table(
+            sim_text=sim_text,
+            workbook_path=args.populate_master_room_list,
+            model_run_type=model_run_type,
+            output_workbook_path=args.output_workbook,
+        )
+        result.update(
+            {
                 "model_run_type": model_run_type,
-                "is_baseline": False,
-                **comparison_result,
+                "space_type_table_match": comparison_result["space_type_table_match"],
+                "mismatch_count": comparison_result["mismatch_count"],
+                "mismatches": comparison_result["mismatches"],
             }
+        )
         print(json.dumps(result, indent=args.indent))
         return
     if args.report == "beps":
