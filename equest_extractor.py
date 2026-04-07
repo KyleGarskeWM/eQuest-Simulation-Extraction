@@ -1489,7 +1489,87 @@ def extract_schedule_table(sim_text: str) -> Dict[str, object]:
             continue
         row = {header[idx]: parts[idx] for idx in range(len(header))}
         rows.append(row)
-    return {"report": report_name or "SCHEDULE", "rows": rows}
+    if rows:
+        return {"report": report_name or "SCHEDULE", "rows": rows}
+    # Fallback parser for LV-G block-style schedules (SCHEDULE NAME/TYPE/FOR DAYS + hourly values).
+    in_lvg = False
+    block_rows: List[Dict[str, str]] = []
+    current: Dict[str, str] | None = None
+    for raw_line in lines:
+        stripped = raw_line.strip()
+        upper = stripped.upper()
+        if "REPORT- LV-G" in upper:
+            in_lvg = True
+            continue
+        if in_lvg and upper.startswith("REPORT-") and "REPORT- LV-G" not in upper:
+            in_lvg = False
+        if not in_lvg or not stripped:
+            continue
+        name_match = re.search(r"SCHEDULE\s+NAME\s*[:=]\s*(.+)$", stripped, re.IGNORECASE)
+        if name_match:
+            if current and current.get("Schedule Name"):
+                block_rows.append(current)
+            current = {"Schedule Name": name_match.group(1).strip(), "Schedule Type": ""}
+            continue
+        if current is None:
+            continue
+        type_match = re.search(r"SCHEDULE\s+TYPE\s*[:=]\s*(.+)$", stripped, re.IGNORECASE)
+        if type_match:
+            current["Schedule Type"] = type_match.group(1).strip()
+            continue
+        for_days_match = re.search(r"FOR\s+DAYS\s*[:=]\s*(.+)$", stripped, re.IGNORECASE)
+        if for_days_match:
+            current["FOR_DAYS"] = for_days_match.group(1).strip()
+            continue
+        hour_label_match = re.match(r"^\s*(\d{1,2})\s*(AM|PM)?\s*[:=]?\s*(-?\d+(?:\.\d+)?)\s*$", stripped, re.IGNORECASE)
+        if hour_label_match:
+            hour_num = int(hour_label_match.group(1))
+            if 1 <= hour_num <= 24:
+                current[str(hour_num)] = hour_label_match.group(3)
+            continue
+        if "VALUES" in upper or "HOURLY VALUES" in upper:
+            numeric_tokens = re.findall(r"-?\d+(?:\.\d+)?", stripped)
+            if len(numeric_tokens) >= 24:
+                for hour_idx in range(1, 25):
+                    current[str(hour_idx)] = numeric_tokens[hour_idx - 1]
+    if current and current.get("Schedule Name"):
+        block_rows.append(current)
+    return {"report": "LV-G" if block_rows else (report_name or "SCHEDULE"), "rows": block_rows}
+
+
+def _for_days_flags(for_days_value: str) -> Dict[str, str]:
+    text = (for_days_value or "").upper()
+    tokenized = text.replace(",", " ").replace("/", " ").replace("-", " ")
+    tokens = {token for token in tokenized.split() if token}
+    flags = {day: "" for day in ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]}
+    sunday_tokens = {"SUN", "SUNDAY"}
+    monday_tokens = {"MON", "MONDAY"}
+    tuesday_tokens = {"TUE", "TUES", "TUESDAY"}
+    wednesday_tokens = {"WED", "WEDNESDAY"}
+    thursday_tokens = {"THU", "THUR", "THURS", "THURSDAY"}
+    friday_tokens = {"FRI", "FRIDAY"}
+    saturday_tokens = {"SAT", "SATURDAY"}
+    if tokens.intersection(sunday_tokens):
+        flags["Sunday"] = "X"
+    if tokens.intersection(monday_tokens):
+        flags["Monday"] = "X"
+    if tokens.intersection(tuesday_tokens):
+        flags["Tuesday"] = "X"
+    if tokens.intersection(wednesday_tokens):
+        flags["Wednesday"] = "X"
+    if tokens.intersection(thursday_tokens):
+        flags["Thursday"] = "X"
+    if tokens.intersection(friday_tokens):
+        flags["Friday"] = "X"
+    if tokens.intersection(saturday_tokens):
+        flags["Saturday"] = "X"
+    if "WEEKDAY" in text or "WEEKDAYS" in text or "WKDAY" in text or "WKDAYS" in text:
+        for day in ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]:
+            flags[day] = "X"
+    if "WEEKEND" in text or "WEEKENDS" in text or "WKEND" in text or "WKENDS" in text:
+        flags["Sunday"] = "X"
+        flags["Saturday"] = "X"
+    return flags
 
 
 def populate_equest_schedule_importer_table(
@@ -1505,14 +1585,34 @@ def populate_equest_schedule_importer_table(
         sheet = workbook["eQuest Schedule Importer"]
         start_row = 2
         max_rows = 79
+        day_columns = {
+            "Sunday": "C",
+            "Monday": "D",
+            "Tuesday": "E",
+            "Wednesday": "F",
+            "Thursday": "G",
+            "Friday": "H",
+            "Saturday": "I",
+        }
         for idx in range(max_rows):
             row_number = start_row + idx
             row_data = rows[idx] if idx < len(rows) else {}
             sheet[f"A{row_number}"] = row_data.get("Schedule Name", "")
             sheet[f"B{row_number}"] = row_data.get("Schedule Type", "")
+            day_flags = _for_days_flags(str(row_data.get("FOR_DAYS", "")))
+            for day_name, col in day_columns.items():
+                existing_day_value = str(row_data.get(day_name, "")).strip().upper()
+                if existing_day_value not in {"", "0", "N", "NO"}:
+                    day_flags[day_name] = "X"
+                sheet[f"{col}{row_number}"] = day_flags[day_name]
+            sheet[f"J{row_number}"] = "X" if str(row_data.get("Holiday", "")).strip().upper() not in {"", "0", "N", "NO"} else ""
+            sheet[f"K{row_number}"] = "TRUE" if str(row_data.get("Weekday", "")).strip().upper() not in {"", "0", "N", "NO"} else ""
+            sheet[f"L{row_number}"] = "TRUE" if str(row_data.get("Weekend", "")).strip().upper() not in {"", "0", "N", "NO"} else ""
+            sheet[f"M{row_number}"] = "TRUE" if str(row_data.get("Holiday Check", "")).strip().upper() not in {"", "0", "N", "NO"} else ""
             for hour in range(1, 25):
                 col = _excel_column_name(13 + hour)
-                value = row_data.get(str(hour))
+                hour_label = f"{hour} AM" if hour <= 11 else ("12 PM" if hour == 12 else ("24 AM" if hour == 24 else f"{hour} PM"))
+                value = row_data.get(str(hour), row_data.get(hour_label))
                 sheet[f"{col}{row_number}"] = float(value) if value not in (None, "") else None
         workbook.save(output_workbook_path)
         return {
