@@ -4,6 +4,7 @@ import unittest
 import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
+from unittest.mock import patch
 
 from run_local import build_command
 from equest_extractor import (
@@ -71,6 +72,43 @@ class TestBepsExtractor(unittest.TestCase):
             }
         )
         self.assertIn("--populate-schedules", schedule_command)
+
+    def test_openpyxl_write_loads_disable_external_links_for_master_room_list(self):
+        sim_text = """
+        REPORT- LV-B Summary of Spaces
+        Spaces on floor: Level 1
+        010-Bike Storage                     1.0   INT   89.4    0.80    1.0    0.50   AIR-CHANGE  0.10      1038.1      12457.7
+        CONDITIONED FLOOR AREA          =     107479.2  SQFT
+        REPORT- END
+        """
+        with patch("equest_extractor.load_workbook", side_effect=RuntimeError("mocked load failure")) as mock_loader:
+            with self.assertRaisesRegex(RuntimeError, "mocked load failure"):
+                populate_master_room_list_space_type_table(
+                    sim_text=sim_text,
+                    workbook_path=Path("dummy.xlsm"),
+                    model_run_type="Baseline",
+                    output_workbook_path=Path("out.xlsm"),
+                )
+        self.assertEqual(mock_loader.call_args.kwargs.get("keep_links"), False)
+
+    def test_openpyxl_write_loads_disable_external_links_for_ecm_data(self):
+        sim_text = """
+        REPORT- BEPS Building Energy Performance
+        COMM ELECTRICITY
+            MBTU          0.0      0.0     51.6      0.0      0.0      0.0     43.3      0.0      0.0      0.0      0.0     10.9     105.8
+        FM1  NATURAL-GAS
+            MBTU          0.0      0.0      0.0   2702.0      0.0      0.0      0.0      0.0      0.0      0.0   2389.0      0.0    5091.0
+        REPORT- END
+        """
+        with patch("equest_extractor.load_workbook", side_effect=RuntimeError("mocked load failure")) as mock_loader:
+            with self.assertRaisesRegex(RuntimeError, "mocked load failure"):
+                populate_ecm_data_from_reports(
+                    sim_text=sim_text,
+                    workbook_path=Path("dummy.xlsm"),
+                    model_run_type="Baseline",
+                    output_workbook_path=Path("out.xlsm"),
+                )
+        self.assertEqual(mock_loader.call_args.kwargs.get("keep_links"), False)
 
     def test_extracts_all_beps_columns_and_totals_by_fuel(self):
         sim_text = """

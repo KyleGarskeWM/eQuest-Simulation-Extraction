@@ -818,7 +818,9 @@ def populate_master_room_list_space_type_table(
             "Unsupported model run type for room data import. Supported: Baseline, Proposed, ECM-1..ECM-7."
         )
     if load_workbook is not None:
-        workbook = load_workbook(workbook_path, keep_vba=True)
+        # keep_links=False avoids writing stale/invalid cached external-link records
+        # that can trigger Excel "Repaired Records: External formula reference" messages.
+        workbook = load_workbook(workbook_path, keep_vba=True, keep_links=False)
         sheet = workbook["Master Room List"]
         raw_data_sheet = workbook["Raw Data - eQuest Import"]
         utility_sheet = workbook["Utilities"]
@@ -1069,7 +1071,9 @@ def populate_ecm_data_from_reports(
     gas_demand_row_number = section_start + 4
     writable_columns = "BCDEFGHIJKLMNOPQRS"
     if load_workbook is not None:
-        workbook = load_workbook(workbook_path, keep_vba=True)
+        # keep_links=False avoids writing stale/invalid cached external-link records
+        # that can trigger Excel "Repaired Records: External formula reference" messages.
+        workbook = load_workbook(workbook_path, keep_vba=True, keep_links=False)
         sheet = workbook["ECM Data"]
         for col in writable_columns:
             sheet[f"{col}{elec_energy_row_number}"] = None
