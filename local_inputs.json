@@ -4,5 +4,6 @@
   "workbook_path": "A:\\Users\\kyleg\\PycharmProjects\\eQuest-Simulation-Extraction\\output_files\\Building Performance Assumptions.xlsm",
   "output_workbook_path": "A:\\Users\\kyleg\\PycharmProjects\\eQuest-Simulation-Extraction\\output_files\\Building Performance Assumptions.updated.xlsm",
   "model_run_type": "Baseline",
-  "report": "all"
+  "report": "all",
+  "graph_config_path": null
 }

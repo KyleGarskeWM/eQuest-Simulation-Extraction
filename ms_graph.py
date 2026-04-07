@@ -25,15 +25,40 @@ class GraphSettings:
 
     @classmethod
     def from_env(cls) -> "GraphSettings":
-        client_id = os.getenv("GRAPH_CLIENT_ID")
+        config_data = load_graph_config_from_file(os.getenv("GRAPH_CONFIG_PATH"))
+        client_id = first_non_empty(os.getenv("GRAPH_CLIENT_ID"), config_data.get("client_id"))
         if not client_id:
-            raise ValueError("Missing GRAPH_CLIENT_ID environment variable.")
+            raise ValueError("Missing GRAPH_CLIENT_ID. Set env var or provide it in GRAPH_CONFIG_PATH JSON.")
         return cls(
             client_id=client_id,
-            tenant_id=os.getenv("GRAPH_TENANT_ID", "organizations"),
-            client_secret=os.getenv("GRAPH_CLIENT_SECRET"),
-            user_id=os.getenv("GRAPH_USER_ID"),
+            tenant_id=first_non_empty(os.getenv("GRAPH_TENANT_ID"), config_data.get("tenant_id"), "organizations"),
+            client_secret=first_non_empty(os.getenv("GRAPH_CLIENT_SECRET"), config_data.get("client_secret")),
+            user_id=first_non_empty(os.getenv("GRAPH_USER_ID"), config_data.get("user_id")),
         )
+
+
+def first_non_empty(*values: Optional[str]) -> Optional[str]:
+    for value in values:
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return None
+
+
+def load_graph_config_from_file(path_value: Optional[str]) -> dict[str, str]:
+    if not path_value:
+        return {}
+    graph_path = Path(path_value).expanduser()
+    if not graph_path.exists():
+        raise FileNotFoundError(f"Graph config file not found: {graph_path}")
+    data = json.loads(graph_path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("GRAPH_CONFIG_PATH JSON must contain an object.")
+    return {
+        "client_id": first_non_empty(data.get("client_id")),
+        "tenant_id": first_non_empty(data.get("tenant_id")),
+        "client_secret": first_non_empty(data.get("client_secret"), data.get("app_secret")),
+        "user_id": first_non_empty(data.get("user_id")),
+    }
 
 
 class GraphClient:

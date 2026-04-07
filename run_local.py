@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -19,6 +20,23 @@ SUPPORTED_MODEL_RUN_TYPES = {
     "ECM-6",
     "ECM-7",
 }
+
+GRAPH_CONFIG_TO_ENV = {
+    "client_id": "GRAPH_CLIENT_ID",
+    "tenant_id": "GRAPH_TENANT_ID",
+    "client_secret": "GRAPH_CLIENT_SECRET",
+    "user_id": "GRAPH_USER_ID",
+}
+
+
+def resolve_graph_config_path(config: dict, config_path: Path) -> str | None:
+    graph_config_path = config.get("graph_config_path")
+    if graph_config_path in (None, ""):
+        return None
+    path_value = Path(str(graph_config_path))
+    if not path_value.is_absolute():
+        path_value = (config_path.parent / path_value).resolve()
+    return str(path_value)
 
 
 def resolve_model_run_type(config: dict, default: str) -> str:
@@ -105,6 +123,28 @@ def build_combined_commands(config: dict, intermediate_output_path: str) -> list
     ]
 
 
+def build_process_env(config: dict, config_path: Path) -> dict[str, str]:
+    """Build child process env, optionally injecting Graph auth settings from config."""
+    process_env = os.environ.copy()
+    resolved_graph_config_path = resolve_graph_config_path(config, config_path=config_path)
+    if resolved_graph_config_path:
+        process_env["GRAPH_CONFIG_PATH"] = resolved_graph_config_path
+    graph_config = config.get("graph")
+    if not graph_config:
+        return process_env
+    if not isinstance(graph_config, dict):
+        raise ValueError("local_inputs.json 'graph' must be an object when provided.")
+    for config_key, env_key in GRAPH_CONFIG_TO_ENV.items():
+        value = graph_config.get(config_key)
+        if value is not None:
+            process_env[env_key] = str(value)
+    return process_env
+
+
+def run_command(command: list[str], process_env: dict[str, str], cwd: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(command, text=True, capture_output=True, cwd=cwd, env=process_env)
+
+
 def main() -> None:
     config_path = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("local_inputs.json")
     if not config_path.exists():
@@ -112,13 +152,15 @@ def main() -> None:
             f"Config file not found: {config_path}. Copy local_inputs.template.json to local_inputs.json and edit paths."
         )
     config = json.loads(config_path.read_text(encoding="utf-8"))
+    process_env = build_process_env(config, config_path=config_path)
+    script_dir = Path(__file__).resolve().parent
     mode = config.get("mode", "extract_report")
     if mode == "combined":
         with tempfile.TemporaryDirectory() as temp_dir:
             intermediate_output = str(Path(temp_dir) / "master_room_intermediate.xlsm")
             commands = build_combined_commands(config, intermediate_output_path=intermediate_output)
             for command in commands:
-                result = subprocess.run(command, text=True, capture_output=True, cwd=Path(__file__).resolve().parent)
+                result = run_command(command, process_env=process_env, cwd=script_dir)
                 if result.stdout:
                     print(result.stdout)
                 if result.returncode != 0:
@@ -127,7 +169,7 @@ def main() -> None:
                     raise SystemExit(result.returncode)
     else:
         command = build_command(config)
-        result = subprocess.run(command, text=True, capture_output=True, cwd=Path(__file__).resolve().parent)
+        result = run_command(command, process_env=process_env, cwd=script_dir)
         if result.stdout:
             print(result.stdout)
         if result.returncode != 0:

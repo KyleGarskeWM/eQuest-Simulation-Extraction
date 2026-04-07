@@ -98,6 +98,39 @@ Set these before running:
 - `GRAPH_CLIENT_SECRET` (optional; if omitted, device code login is used)
 - `GRAPH_USER_ID` (recommended for app-only auth; target user UPN or object ID)
 
+### Using `run_local.py` with saved local Graph settings
+
+Use `graph_config_path` in `local_inputs.json` to point to a local JSON file (for example, a OneDrive-synced local path) that stores Graph credentials.
+
+`run_local.py` exports this path as `GRAPH_CONFIG_PATH`, and `ms_graph.py` will load `client_id`, `tenant_id`, `client_secret` (or `app_secret`), and `user_id` from that file.
+Environment variables still override file values if both are provided.
+
+Example:
+
+```json
+{
+  "mode": "combined",
+  "sim_file": "onedrive:/Projects/eQuest/MyModel.SIM",
+  "workbook_path": "onedrive:/Projects/eQuest/Building Performance Assumptions.xlsm",
+  "output_workbook_path": "onedrive:/Projects/eQuest/Building Performance Assumptions.updated.xlsm",
+  "model_run_type": "Baseline",
+  "graph_config_path": "C:/Users/you/OneDrive/local_graph_inputs.json"
+}
+```
+
+`local_graph_inputs.json` example:
+
+```json
+{
+  "client_id": "YOUR_APP_CLIENT_ID",
+  "tenant_id": "organizations",
+  "app_secret": "YOUR_APP_CLIENT_SECRET",
+  "user_id": "user@yourtenant.com"
+}
+```
+
+If `graph_config_path` is omitted, behavior remains env-vars-only.
+
 ### Examples
 
 ```bash
