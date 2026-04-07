@@ -210,22 +210,21 @@ class TestBepsExtractor(unittest.TestCase):
             result = populate_master_room_list_space_type_table(
                 sim_text=sim_text,
                 workbook_path=workbook_path,
+                model_run_type="Baseline",
                 output_workbook_path=output_path,
             )
             self.assertEqual(result["spaces_written"], 2)
+            self.assertTrue(result["space_type_qaqc_updated"])
             with zipfile.ZipFile(output_path, "r") as workbook_zip:
                 sheet_payload = workbook_zip.read("xl/worksheets/sheet1.xml")
                 sheet = ET.fromstring(sheet_payload)
                 utility_sheet = ET.fromstring(workbook_zip.read("xl/worksheets/sheet7.xml"))
-                master_table = ET.fromstring(workbook_zip.read("xl/tables/table2.xml"))
             ns = {"m": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
             d16 = sheet.find(".//m:c[@r='D16']", ns)
             g16 = sheet.find(".//m:c[@r='G16']/m:v", ns)
             h16 = sheet.find(".//m:c[@r='H16']/m:v", ns)
             i16 = sheet.find(".//m:c[@r='I16']/m:v", ns)
             j16 = sheet.find(".//m:c[@r='J16']/m:v", ns)
-            k16 = sheet.find(".//m:c[@r='K16']", ns)
-            l16 = sheet.find(".//m:c[@r='L16']/m:v", ns)
             self.assertIsNotNone(d16)
             self.assertEqual(d16.attrib.get("t"), "inlineStr")
             d16_text = "".join(node.text or "" for node in d16.iter("{http://schemas.openxmlformats.org/spreadsheetml/2006/main}t"))
@@ -235,18 +234,12 @@ class TestBepsExtractor(unittest.TestCase):
             self.assertAlmostEqual(float(h16.text), float(first_space_data["lights_w_per_sqft"]))
             self.assertAlmostEqual(float(i16.text), float(first_space_data["equip_w_per_sqft"]))
             self.assertAlmostEqual(float(j16.text), float(first_space_data["people"]))
-            table_columns = [
-                c.attrib.get("name", "")
-                for c in master_table.findall(".//{http://schemas.openxmlformats.org/spreadsheetml/2006/main}tableColumn")
-            ]
-            if "Temperature Setpoint (F)" in table_columns:
-                self.assertIsNotNone(k16)
-                k16_value = k16.find("{http://schemas.openxmlformats.org/spreadsheetml/2006/main}v")
-                self.assertIsNotNone(k16_value)
-                self.assertEqual(float(k16_value.text), 74.0)
-            if "Temperature Setback (F)" in table_columns:
-                self.assertIsNotNone(l16)
-                self.assertEqual(float(l16.text), 70.0)
+            u4 = sheet.find(".//m:c[@r='U4']/m:v", ns)
+            u5 = sheet.find(".//m:c[@r='U5']/m:v", ns)
+            self.assertIsNotNone(u4)
+            self.assertEqual(u4.text, "1")
+            self.assertIsNotNone(u5)
+            self.assertEqual(u5.text, "0")
             b2 = utility_sheet.find(".//m:c[@r='B2']", ns)
             c2 = utility_sheet.find(".//m:c[@r='C2']", ns)
             d2 = utility_sheet.find(".//m:c[@r='D2']", ns)
@@ -275,6 +268,7 @@ class TestBepsExtractor(unittest.TestCase):
             populate_master_room_list_space_type_table(
                 sim_text=sim_text,
                 workbook_path=workbook_path,
+                model_run_type="Baseline",
                 output_workbook_path=populated_path,
             )
             comparison = check_master_room_list_space_type_table_match(
@@ -301,6 +295,7 @@ class TestBepsExtractor(unittest.TestCase):
             populate_master_room_list_space_type_table(
                 sim_text=sim_text,
                 workbook_path=workbook_path,
+                model_run_type="Baseline",
                 output_workbook_path=populated_path,
             )
             comparison = check_master_room_list_space_type_table_match(
