@@ -1606,9 +1606,9 @@ def populate_equest_schedule_importer_table(
                     day_flags[day_name] = "X"
                 sheet[f"{col}{row_number}"] = day_flags[day_name]
             sheet[f"J{row_number}"] = "X" if str(row_data.get("Holiday", "")).strip().upper() not in {"", "0", "N", "NO"} else ""
-            sheet[f"K{row_number}"] = "X" if str(row_data.get("Weekday", "")).strip().upper() not in {"", "0", "N", "NO"} else ""
-            sheet[f"L{row_number}"] = "X" if str(row_data.get("Weekend", "")).strip().upper() not in {"", "0", "N", "NO"} else ""
-            sheet[f"M{row_number}"] = "X" if str(row_data.get("Holiday Check", "")).strip().upper() not in {"", "0", "N", "NO"} else ""
+            sheet[f"K{row_number}"] = "TRUE" if str(row_data.get("Weekday", "")).strip().upper() not in {"", "0", "N", "NO"} else ""
+            sheet[f"L{row_number}"] = "TRUE" if str(row_data.get("Weekend", "")).strip().upper() not in {"", "0", "N", "NO"} else ""
+            sheet[f"M{row_number}"] = "TRUE" if str(row_data.get("Holiday Check", "")).strip().upper() not in {"", "0", "N", "NO"} else ""
             for hour in range(1, 25):
                 col = _excel_column_name(13 + hour)
                 hour_label = f"{hour} AM" if hour <= 11 else ("12 PM" if hour == 12 else ("24 AM" if hour == 24 else f"{hour} PM"))
