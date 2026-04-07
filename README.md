@@ -6,6 +6,8 @@ This repository includes a Python utility (`equest_extractor.py`) to extract **B
 ## Requirements
 
 - Python 3.9+ (Anaconda Python is fine)
+- `msal` if you want to read/write files from OneDrive for Business through Microsoft Graph.
+  - `pip install msal`
 - Recommended: `openpyxl` for safest `.xlsm` read/write behavior.
   - `pip install openpyxl`
 - Without `openpyxl`, the tool falls back to XML-level editing.
@@ -172,6 +174,32 @@ python equest_extractor.py /path/to/file.SIM \
   --update-ecm-data /path/to/Building\ Performance\ Assumptions.xlsm \
   --model-run-type ECM-3 \
   --output-workbook /path/to/Building\ Performance\ Assumptions.updated.xlsm
+```
+
+## OneDrive for Business (Microsoft Graph)
+
+You can now pass OneDrive paths anywhere a file path is accepted by using the `onedrive:` prefix.
+
+### Environment variables
+
+Set these before running:
+
+- `GRAPH_CLIENT_ID` (required)
+- `GRAPH_TENANT_ID` (optional, default: `organizations`)
+- `GRAPH_CLIENT_SECRET` (optional; if omitted, device code login is used)
+- `GRAPH_USER_ID` (recommended for app-only auth; target user UPN or object ID)
+
+### Examples
+
+```bash
+# Read SIM from OneDrive, return JSON in console.
+python equest_extractor.py "onedrive:/Projects/eQuest/MyModel.SIM" --report all
+
+# Read workbook from OneDrive and upload output workbook back to OneDrive.
+python equest_extractor.py "onedrive:/Projects/eQuest/MyModel.SIM" \
+  --update-ecm-data "onedrive:/Projects/eQuest/Building Performance Assumptions.xlsm" \
+  --model-run-type Baseline \
+  --output-workbook "onedrive:/Projects/eQuest/Building Performance Assumptions.updated.xlsm"
 ```
 
 ## Power Automate + Teams card input

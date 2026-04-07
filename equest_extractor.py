@@ -6,10 +6,11 @@ import io
 import json
 import os
 import re
+import tempfile
 import zipfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 try:
     from openpyxl import load_workbook
 except ImportError:  # pragma: no cover - optional dependency for safer workbook writes
@@ -129,6 +130,8 @@ KBTU_PER_UNIT = {
     "MMBTU": 1000.0,
     "BTU": 0.001,
 }
+
+ONEDRIVE_PREFIX = "onedrive:"
 def _clean_number(value: str) -> float:
     return float(value.replace(",", ""))
 def _parse_values_line(line: str) -> tuple[str, List[float]]:
@@ -1368,11 +1371,41 @@ def populate_equest_schedule_importer_table(
         "rows_available": max_rows,
         "output_workbook": str(output_workbook_path),
     }
+
+
+def _is_onedrive_reference(path_value: Optional[str]) -> bool:
+    return bool(path_value and path_value.lower().startswith(ONEDRIVE_PREFIX))
+
+
+def _to_onedrive_path(path_value: str) -> str:
+    return path_value[len(ONEDRIVE_PREFIX) :].strip()
+
+
+def _resolve_input_path(path_value: str, graph_client, temp_dir: Path, label: str) -> Path:
+    if _is_onedrive_reference(path_value):
+        onedrive_path = _to_onedrive_path(path_value)
+        local_name = Path(onedrive_path).name or f"{label}.tmp"
+        local_path = temp_dir / f"{label}_{local_name}"
+        graph_client.download_onedrive_file(onedrive_path, local_path)
+        return local_path
+    return Path(path_value)
+
+
+def _resolve_output_path(path_value: str, temp_dir: Path) -> Path:
+    if _is_onedrive_reference(path_value):
+        onedrive_path = _to_onedrive_path(path_value)
+        local_name = Path(onedrive_path).name or "output.tmp"
+        return temp_dir / f"upload_{local_name}"
+    return Path(path_value)
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Extract BEPS, LV-B, LV-D, LV-I, LS-A, LV-M, ES-D, and PS-H report data from an eQuest SIM file."
     )
-    parser.add_argument("sim_file", type=Path, help="Path to the eQuest .SIM file")
+    parser.add_argument(
+        "sim_file",
+        type=str,
+        help="Path to the eQuest .SIM file. Use onedrive:/path/to/file.SIM to read from OneDrive via Microsoft Graph.",
+    )
     parser.add_argument(
         "--report",
         choices=["beps", "lv-b", "lv-d", "lv-i", "ls-a", "lv-m", "es-d", "ps-h", "all"],
@@ -1416,85 +1449,120 @@ def main() -> None:
         help="List discovered REPORT-* sections in the SIM file and exit.",
     )
     args = parser.parse_args()
-    sim_text = args.sim_file.read_text(errors="ignore")
-    if args.list_reports:
-        print(json.dumps(detect_available_reports(sim_text), indent=args.indent))
-        return
-    if args.update_ecm_data:
-        if not args.output_workbook:
-            raise ValueError("--output-workbook is required when using --update-ecm-data.")
-        model_run_type = resolve_model_run_type(args.model_run_type)
-        result = populate_ecm_data_from_reports(
-            sim_text=sim_text,
-            workbook_path=args.update_ecm_data,
-            model_run_type=model_run_type,
-            output_workbook_path=args.output_workbook,
-        )
-        print(json.dumps(result, indent=args.indent))
-        return
-    if args.populate_schedules:
-        if not args.output_workbook:
-            raise ValueError("--output-workbook is required when using --populate-schedules.")
-        result = populate_equest_schedule_importer_table(
-            sim_text=sim_text,
-            workbook_path=args.populate_schedules,
-            output_workbook_path=args.output_workbook,
-        )
-        print(json.dumps(result, indent=args.indent))
-        return
-    if args.populate_master_room_list:
-        model_run_type = resolve_model_run_type(args.model_run_type)
-        if not args.output_workbook:
-            raise ValueError("--output-workbook is required when using --populate-master-room-list.")
-        comparison_result = check_master_room_list_space_type_table_match(
-            sim_text=sim_text,
-            workbook_path=args.populate_master_room_list,
-        )
-        result = populate_master_room_list_space_type_table(
-            sim_text=sim_text,
-            workbook_path=args.populate_master_room_list,
-            model_run_type=model_run_type,
-            output_workbook_path=args.output_workbook,
-        )
-        result.update(
-            {
-                "model_run_type": model_run_type,
-                "space_type_table_match": comparison_result["space_type_table_match"],
-                "mismatch_count": comparison_result["mismatch_count"],
-                "mismatches": comparison_result["mismatches"],
+    needs_graph = any(
+        _is_onedrive_reference(value)
+        for value in [
+            args.sim_file,
+            str(args.populate_master_room_list) if args.populate_master_room_list else None,
+            str(args.update_ecm_data) if args.update_ecm_data else None,
+            str(args.populate_schedules) if args.populate_schedules else None,
+            str(args.output_workbook) if args.output_workbook else None,
+        ]
+    )
+    graph_client = None
+    if needs_graph:
+        from ms_graph import GraphClient, GraphSettings
+
+        graph_client = GraphClient(GraphSettings.from_env())
+
+    with tempfile.TemporaryDirectory(prefix="equest_graph_") as tmp:
+        temp_dir = Path(tmp)
+        sim_path = _resolve_input_path(args.sim_file, graph_client, temp_dir, "sim") if needs_graph else Path(args.sim_file)
+        sim_text = sim_path.read_text(errors="ignore")
+
+        if args.list_reports:
+            print(json.dumps(detect_available_reports(sim_text), indent=args.indent))
+            return
+        if args.update_ecm_data:
+            if not args.output_workbook:
+                raise ValueError("--output-workbook is required when using --update-ecm-data.")
+            model_run_type = resolve_model_run_type(args.model_run_type)
+            workbook_path = _resolve_input_path(str(args.update_ecm_data), graph_client, temp_dir, "ecm") if needs_graph else args.update_ecm_data
+            output_path = _resolve_output_path(str(args.output_workbook), temp_dir) if needs_graph else args.output_workbook
+            result = populate_ecm_data_from_reports(
+                sim_text=sim_text,
+                workbook_path=workbook_path,
+                model_run_type=model_run_type,
+                output_workbook_path=output_path,
+            )
+            if _is_onedrive_reference(str(args.output_workbook)):
+                graph_client.upload_onedrive_file(output_path, _to_onedrive_path(str(args.output_workbook)))
+                result["uploaded_output_workbook"] = str(args.output_workbook)
+            print(json.dumps(result, indent=args.indent))
+            return
+        if args.populate_schedules:
+            if not args.output_workbook:
+                raise ValueError("--output-workbook is required when using --populate-schedules.")
+            workbook_path = _resolve_input_path(str(args.populate_schedules), graph_client, temp_dir, "schedules") if needs_graph else args.populate_schedules
+            output_path = _resolve_output_path(str(args.output_workbook), temp_dir) if needs_graph else args.output_workbook
+            result = populate_equest_schedule_importer_table(
+                sim_text=sim_text,
+                workbook_path=workbook_path,
+                output_workbook_path=output_path,
+            )
+            if _is_onedrive_reference(str(args.output_workbook)):
+                graph_client.upload_onedrive_file(output_path, _to_onedrive_path(str(args.output_workbook)))
+                result["uploaded_output_workbook"] = str(args.output_workbook)
+            print(json.dumps(result, indent=args.indent))
+            return
+        if args.populate_master_room_list:
+            model_run_type = resolve_model_run_type(args.model_run_type)
+            if not args.output_workbook:
+                raise ValueError("--output-workbook is required when using --populate-master-room-list.")
+            workbook_path = _resolve_input_path(str(args.populate_master_room_list), graph_client, temp_dir, "master_room") if needs_graph else args.populate_master_room_list
+            output_path = _resolve_output_path(str(args.output_workbook), temp_dir) if needs_graph else args.output_workbook
+            comparison_result = check_master_room_list_space_type_table_match(
+                sim_text=sim_text,
+                workbook_path=workbook_path,
+            )
+            result = populate_master_room_list_space_type_table(
+                sim_text=sim_text,
+                workbook_path=workbook_path,
+                model_run_type=model_run_type,
+                output_workbook_path=output_path,
+            )
+            result.update(
+                {
+                    "model_run_type": model_run_type,
+                    "space_type_table_match": comparison_result["space_type_table_match"],
+                    "mismatch_count": comparison_result["mismatch_count"],
+                    "mismatches": comparison_result["mismatches"],
+                }
+            )
+            if _is_onedrive_reference(str(args.output_workbook)):
+                graph_client.upload_onedrive_file(output_path, _to_onedrive_path(str(args.output_workbook)))
+                result["uploaded_output_workbook"] = str(args.output_workbook)
+            print(json.dumps(result, indent=args.indent))
+            return
+        if args.report == "beps":
+            result = extract_beps_report(sim_text)
+        elif args.report == "lv-b":
+            result = extract_lv_b_spaces(sim_text)
+        elif args.report == "lv-d":
+            result = extract_lv_d_report(sim_text)
+        elif args.report == "lv-i":
+            result = extract_lv_i_constructions(sim_text)
+        elif args.report == "ls-a":
+            result = extract_ls_a_peak_loads(sim_text)
+        elif args.report == "lv-m":
+            result = extract_lv_m_conversions(sim_text)
+        elif args.report == "es-d":
+            result = extract_es_d_energy_cost_summary(sim_text)
+        elif args.report == "ps-h":
+            result = extract_ps_h_details(sim_text)
+        else:
+            lv_b_result = extract_lv_b_spaces(sim_text)
+            lv_m_result = extract_lv_m_conversions(sim_text)
+            result = {
+                "beps": extract_beps_report(sim_text),
+                "lv_b_spaces": lv_b_result,
+                "lv_d": extract_lv_d_report(sim_text),
+                "lv_i": extract_lv_i_constructions(sim_text),
+                "ls_a_peak_loads": extract_ls_a_peak_loads(sim_text, lv_b_result=lv_b_result),
+                "lv_m": lv_m_result,
+                "es_d": extract_es_d_energy_cost_summary(sim_text),
+                "ps_h": extract_ps_h_details(sim_text),
             }
-        )
         print(json.dumps(result, indent=args.indent))
-        return
-    if args.report == "beps":
-        result = extract_beps_report(sim_text)
-    elif args.report == "lv-b":
-        result = extract_lv_b_spaces(sim_text)
-    elif args.report == "lv-d":
-        result = extract_lv_d_report(sim_text)
-    elif args.report == "lv-i":
-        result = extract_lv_i_constructions(sim_text)
-    elif args.report == "ls-a":
-        result = extract_ls_a_peak_loads(sim_text)
-    elif args.report == "lv-m":
-        result = extract_lv_m_conversions(sim_text)
-    elif args.report == "es-d":
-        result = extract_es_d_energy_cost_summary(sim_text)
-    elif args.report == "ps-h":
-        result = extract_ps_h_details(sim_text)
-    else:
-        lv_b_result = extract_lv_b_spaces(sim_text)
-        lv_m_result = extract_lv_m_conversions(sim_text)
-        result = {
-            "beps": extract_beps_report(sim_text),
-            "lv_b_spaces": lv_b_result,
-            "lv_d": extract_lv_d_report(sim_text),
-            "lv_i": extract_lv_i_constructions(sim_text),
-            "ls_a_peak_loads": extract_ls_a_peak_loads(sim_text, lv_b_result=lv_b_result),
-            "lv_m": lv_m_result,
-            "es_d": extract_es_d_energy_cost_summary(sim_text),
-            "ps_h": extract_ps_h_details(sim_text),
-        }
-    print(json.dumps(result, indent=args.indent))
 if __name__ == "__main__":
     main()

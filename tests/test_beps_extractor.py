@@ -7,6 +7,8 @@ from pathlib import Path
 
 from run_local import build_command
 from equest_extractor import (
+    _is_onedrive_reference,
+    _to_onedrive_path,
     check_master_room_list_space_type_table_match,
     convert_value,
     extract_beps_report,
@@ -27,6 +29,11 @@ from equest_extractor import (
 
 
 class TestBepsExtractor(unittest.TestCase):
+    def test_onedrive_reference_helpers(self):
+        self.assertTrue(_is_onedrive_reference("onedrive:/folder/file.sim"))
+        self.assertFalse(_is_onedrive_reference("/tmp/file.sim"))
+        self.assertEqual(_to_onedrive_path("onedrive:/folder/file.sim"), "/folder/file.sim")
+
     def test_run_local_build_command_modes(self):
         extract_command = build_command({"sim_file": "a.sim", "mode": "extract_report", "report": "beps"})
         self.assertIn("--report", extract_command)
