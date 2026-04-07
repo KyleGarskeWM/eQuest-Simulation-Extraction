@@ -80,6 +80,8 @@ NS = {"m": MAIN_NS}
 MASTER_ROOM_LIST_SHEET_XML_PATH = "xl/worksheets/sheet1.xml"
 MASTER_ROOM_LIST_SPACE_START_ROW = 16
 MASTER_ROOM_LIST_SPACE_MAX_ROWS = 298
+RAW_DATA_EQ_IMPORT_SHEET_XML_PATH = "xl/worksheets/sheet22.xml"
+RAW_DATA_SPACE_START_ROW = 2
 SPACE_TYPE_QAQC_TABLE_START_ROW = 4
 SPACE_TYPE_QAQC_TABLE_END_ROW = 12
 SPACE_TYPE_QAQC_MODEL_RUN_COLUMN = "T"
@@ -94,6 +96,17 @@ SPACE_TYPE_QAQC_MODEL_ROW_MAP = {
     "ECM-5": 10,
     "ECM-6": 11,
     "ECM-7": 12,
+}
+MODEL_RUN_RAW_DATA_COLUMN_MAP = {
+    "BASELINE": ("G", "H", "I"),
+    "PROPOSED": ("J", "K", "L"),
+    "ECM-1": ("M", "N", "O"),
+    "ECM-2": ("P", "Q", "R"),
+    "ECM-3": ("S", "T", "U"),
+    "ECM-4": ("V", "W", "X"),
+    "ECM-5": ("Y", "Z", "AA"),
+    "ECM-6": ("AB", "AC", "AD"),
+    "ECM-7": ("AE", "AF", "AG"),
 }
 UTILITY_RATES_SHEET_XML_PATH = "xl/worksheets/sheet7.xml"
 ECM_DATA_SHEET_XML_PATH = "xl/worksheets/sheet11.xml"
@@ -572,6 +585,22 @@ def _set_numeric_cell(row: ET.Element, cell_ref: str, value: float | None, style
         v_node.text = f"{value:.6f}".rstrip("0").rstrip(".")
 
 
+def _set_boolean_cell(row: ET.Element, cell_ref: str, value: bool, style: str | None = None) -> None:
+    cell = row.find(f"m:c[@r='{cell_ref}']", NS)
+    if cell is None:
+        attrs = {"r": cell_ref}
+        if style is not None:
+            attrs["s"] = style
+        cell = ET.SubElement(row, f"{{{MAIN_NS}}}c", attrs)
+    elif style is not None and "s" not in cell.attrib:
+        cell.attrib["s"] = style
+    for child in list(cell):
+        cell.remove(child)
+    cell.attrib["t"] = "b"
+    v_node = ET.SubElement(cell, f"{{{MAIN_NS}}}v")
+    v_node.text = "1" if value else "0"
+
+
 def _load_zip_file_map(workbook_path: Path) -> Dict[str, bytes]:
     with zipfile.ZipFile(workbook_path, "r") as workbook_zip:
         return {name: workbook_zip.read(name) for name in workbook_zip.namelist()}
@@ -774,7 +803,7 @@ def populate_master_room_list_space_type_table(
     model_run_type: str,
     output_workbook_path: Path,
 ) -> Dict[str, object]:
-    """Populate Master Room List 'Space Type Table' and Utilities table from LV-B + ES-D."""
+    """Populate Master Room List and Raw Data import tables from LV-B + ES-D."""
     lv_b_result = extract_lv_b_spaces(sim_text)
     try:
         es_d_result = extract_es_d_energy_cost_summary(sim_text)
@@ -783,28 +812,60 @@ def populate_master_room_list_space_type_table(
     spaces = list(lv_b_result["spaces"].items())
     if not spaces:
         raise ValueError("No LV-B spaces found to populate the Master Room List.")
+    normalized_model_run_type = model_run_type.strip().upper()
+    if normalized_model_run_type not in MODEL_RUN_RAW_DATA_COLUMN_MAP:
+        raise ValueError(
+            "Unsupported model run type for room data import. Supported: Baseline, Proposed, ECM-1..ECM-7."
+        )
     if load_workbook is not None:
         workbook = load_workbook(workbook_path, keep_vba=True)
         sheet = workbook["Master Room List"]
+        raw_data_sheet = workbook["Raw Data - eQuest Import"]
         utility_sheet = workbook["Utilities"]
         max_rows = MASTER_ROOM_LIST_SPACE_MAX_ROWS
         start_row = MASTER_ROOM_LIST_SPACE_START_ROW
+        expected_space_names = [space_name for space_name, _ in spaces]
+        existing_space_names = [
+            str(sheet[f"D{start_row + index}"].value).strip() if sheet[f"D{start_row + index}"].value is not None else ""
+            for index in range(max_rows)
+        ]
+        has_existing_space_names = any(name for name in existing_space_names)
+        master_space_name_match = True
+        if has_existing_space_names:
+            for index, expected_name in enumerate(expected_space_names):
+                if existing_space_names[index] != expected_name:
+                    master_space_name_match = False
+                    break
+        else:
+            for index in range(max_rows):
+                row_number = start_row + index
+                if index < len(spaces):
+                    space_name, space_data = spaces[index]
+                    sheet[f"D{row_number}"] = space_name
+                    sheet[f"G{row_number}"] = float(space_data["area_sqft"])
+                else:
+                    sheet[f"D{row_number}"] = None
+                    sheet[f"G{row_number}"] = None
+            written_names = [
+                str(sheet[f"D{start_row + index}"].value).strip() if sheet[f"D{start_row + index}"].value is not None else ""
+                for index in range(len(expected_space_names))
+            ]
+            master_space_name_match = written_names == expected_space_names
+        lpd_col, epd_col, occ_col = MODEL_RUN_RAW_DATA_COLUMN_MAP[normalized_model_run_type]
+        raw_row_by_space_name: Dict[str, int] = {}
         for index in range(max_rows):
-            row_number = start_row + index
-            if index < len(spaces):
-                space_name, space_data = spaces[index]
-                sheet[f"D{row_number}"] = space_name
-                sheet[f"G{row_number}"] = float(space_data["area_sqft"])
-                sheet[f"H{row_number}"] = float(space_data["lights_w_per_sqft"])
-                sheet[f"I{row_number}"] = float(space_data["equip_w_per_sqft"])
-                sheet[f"J{row_number}"] = float(space_data["people"])
-            else:
-                sheet[f"D{row_number}"] = None
-                sheet[f"G{row_number}"] = None
-                sheet[f"H{row_number}"] = None
-                sheet[f"I{row_number}"] = None
-                sheet[f"J{row_number}"] = None
+            row_number = RAW_DATA_SPACE_START_ROW + index
+            raw_name = raw_data_sheet[f"C{row_number}"].value
+            raw_name = str(raw_name).strip() if raw_name is not None else ""
+            if raw_name:
+                raw_row_by_space_name[_normalize_space_name(raw_name)] = row_number
+        for index, (space_name, space_data) in enumerate(spaces[:max_rows]):
+            row_number = raw_row_by_space_name.get(_normalize_space_name(space_name), RAW_DATA_SPACE_START_ROW + index)
+            raw_data_sheet[f"{lpd_col}{row_number}"] = float(space_data["lights_w_per_sqft"])
+            raw_data_sheet[f"{epd_col}{row_number}"] = float(space_data["equip_w_per_sqft"])
+            raw_data_sheet[f"{occ_col}{row_number}"] = float(space_data["people"])
         qaqc_row = _apply_space_type_qaqc_model_run_status_openpyxl(sheet, model_run_type)
+        sheet[f"{SPACE_TYPE_QAQC_STATUS_COLUMN}{qaqc_row}"] = bool(master_space_name_match)
         utility_rates = es_d_result["utility_rates"]
         elec_virtual_rate = next(
             float(data["virtual_rate"]) for data in utility_rates.values() if str(data["unit"]).upper() == "KWH"
@@ -829,8 +890,13 @@ def populate_master_room_list_space_type_table(
             "spaces_found": len(spaces),
             "spaces_written": min(len(spaces), max_rows),
             "spaces_truncated": max(len(spaces) - max_rows, 0),
+            "space_names_previously_present": has_existing_space_names,
+            "space_name_check_passed": master_space_name_match,
+            "raw_data_import_updated": True,
+            "raw_data_target_columns": [lpd_col, epd_col, occ_col],
             "utilities_updated": True,
             "space_type_qaqc_updated": True,
+            "space_type_qaqc_status": bool(master_space_name_match),
             "space_type_qaqc_true_row": qaqc_row,
             "output_workbook": str(output_workbook_path),
         }
@@ -838,55 +904,93 @@ def populate_master_room_list_space_type_table(
     file_map = _load_zip_file_map(workbook_path)
     if MASTER_ROOM_LIST_SHEET_XML_PATH not in file_map:
         raise ValueError("Could not find Master Room List worksheet XML in the workbook.")
+    if RAW_DATA_EQ_IMPORT_SHEET_XML_PATH not in file_map:
+        raise ValueError("Could not find Raw Data - eQuest Import worksheet XML in the workbook.")
     sheet_root = _parse_xml_with_registered_namespaces(file_map[MASTER_ROOM_LIST_SHEET_XML_PATH])
     sheet_data = sheet_root.find("m:sheetData", NS)
     if sheet_data is None:
         raise ValueError("Workbook sheet is missing sheetData.")
+    raw_data_root = _parse_xml_with_registered_namespaces(file_map[RAW_DATA_EQ_IMPORT_SHEET_XML_PATH])
+    raw_data_sheet_data = raw_data_root.find("m:sheetData", NS)
+    if raw_data_sheet_data is None:
+        raise ValueError("Raw Data - eQuest Import sheet is missing sheetData.")
     text_style_template = None
     area_style_template = None
-    lpd_style_template = None
-    epd_style_template = None
-    occupancy_style_template = None
     text_template_cell = sheet_root.find(".//m:c[@r='E16']", NS)
     area_template_cell = sheet_root.find(".//m:c[@r='G16']", NS)
-    lpd_template_cell = sheet_root.find(".//m:c[@r='H16']", NS)
-    epd_template_cell = sheet_root.find(".//m:c[@r='I16']", NS)
-    occupancy_template_cell = sheet_root.find(".//m:c[@r='J16']", NS)
     if text_template_cell is not None:
         text_style_template = text_template_cell.attrib.get("s")
     if area_template_cell is not None:
         area_style_template = area_template_cell.attrib.get("s")
+    max_rows = MASTER_ROOM_LIST_SPACE_MAX_ROWS
+    start_row = MASTER_ROOM_LIST_SPACE_START_ROW
+    expected_space_names = [space_name for space_name, _ in spaces]
+    existing_space_names: List[str] = []
+    for index in range(max_rows):
+        row_number = start_row + index
+        row = sheet_data.find(f"m:row[@r='{row_number}']", NS)
+        existing_name = _read_cell_text(row, f"D{row_number}").strip() if row is not None else ""
+        existing_space_names.append(existing_name)
+    has_existing_space_names = any(name for name in existing_space_names)
+    master_space_name_match = True
+    if has_existing_space_names:
+        for index, expected_name in enumerate(expected_space_names):
+            if existing_space_names[index] != expected_name:
+                master_space_name_match = False
+                break
+    else:
+        for index in range(max_rows):
+            row_number = start_row + index
+            row = _ensure_row(sheet_data, row_number)
+            name_ref = f"D{row_number}"
+            area_ref = f"G{row_number}"
+            if index < len(spaces):
+                space_name, space_data = spaces[index]
+                _set_inline_string_cell(row, name_ref, space_name, style=text_style_template)
+                _set_numeric_cell(row, area_ref, float(space_data["area_sqft"]), style=area_style_template)
+            else:
+                _set_inline_string_cell(row, name_ref, "", style=text_style_template)
+                _set_numeric_cell(row, area_ref, None, style=area_style_template)
+        written_space_names: List[str] = []
+        for index in range(len(expected_space_names)):
+            row_number = start_row + index
+            row = sheet_data.find(f"m:row[@r='{row_number}']", NS)
+            written_space_names.append(_read_cell_text(row, f"D{row_number}").strip() if row is not None else "")
+        master_space_name_match = written_space_names == expected_space_names
+    lpd_col, epd_col, occ_col = MODEL_RUN_RAW_DATA_COLUMN_MAP[normalized_model_run_type]
+    lpd_style_template = None
+    epd_style_template = None
+    occ_style_template = None
+    lpd_template_cell = raw_data_root.find(f".//m:c[@r='{lpd_col}{RAW_DATA_SPACE_START_ROW}']", NS)
+    epd_template_cell = raw_data_root.find(f".//m:c[@r='{epd_col}{RAW_DATA_SPACE_START_ROW}']", NS)
+    occ_template_cell = raw_data_root.find(f".//m:c[@r='{occ_col}{RAW_DATA_SPACE_START_ROW}']", NS)
     if lpd_template_cell is not None:
         lpd_style_template = lpd_template_cell.attrib.get("s")
     if epd_template_cell is not None:
         epd_style_template = epd_template_cell.attrib.get("s")
-    if occupancy_template_cell is not None:
-        occupancy_style_template = occupancy_template_cell.attrib.get("s")
-    max_rows = MASTER_ROOM_LIST_SPACE_MAX_ROWS
-    start_row = MASTER_ROOM_LIST_SPACE_START_ROW
+    if occ_template_cell is not None:
+        occ_style_template = occ_template_cell.attrib.get("s")
+    raw_row_by_space_name: Dict[str, int] = {}
     for index in range(max_rows):
-        row_number = start_row + index
-        row = _ensure_row(sheet_data, row_number)
-        name_ref = f"D{row_number}"
-        area_ref = f"G{row_number}"
-        lpd_ref = f"H{row_number}"
-        epd_ref = f"I{row_number}"
-        occupants_ref = f"J{row_number}"
-        if index < len(spaces):
-            space_name, space_data = spaces[index]
-            _set_inline_string_cell(row, name_ref, space_name, style=text_style_template)
-            _set_numeric_cell(row, area_ref, float(space_data["area_sqft"]), style=area_style_template)
-            _set_numeric_cell(row, lpd_ref, float(space_data["lights_w_per_sqft"]), style=lpd_style_template)
-            _set_numeric_cell(row, epd_ref, float(space_data["equip_w_per_sqft"]), style=epd_style_template)
-            _set_numeric_cell(row, occupants_ref, float(space_data["people"]), style=occupancy_style_template)
-        else:
-            _set_inline_string_cell(row, name_ref, "", style=text_style_template)
-            _set_numeric_cell(row, area_ref, None, style=area_style_template)
-            _set_numeric_cell(row, lpd_ref, None, style=lpd_style_template)
-            _set_numeric_cell(row, epd_ref, None, style=epd_style_template)
-            _set_numeric_cell(row, occupants_ref, None, style=occupancy_style_template)
+        row_number = RAW_DATA_SPACE_START_ROW + index
+        row = raw_data_sheet_data.find(f"m:row[@r='{row_number}']", NS)
+        if row is None:
+            continue
+        space_name = _read_cell_text(row, f"C{row_number}").strip()
+        if space_name:
+            raw_row_by_space_name[_normalize_space_name(space_name)] = row_number
+    for index, (space_name, space_data) in enumerate(spaces[:max_rows]):
+        row_number = raw_row_by_space_name.get(_normalize_space_name(space_name), RAW_DATA_SPACE_START_ROW + index)
+        row = _ensure_row(raw_data_sheet_data, row_number)
+        _set_numeric_cell(row, f"{lpd_col}{row_number}", float(space_data["lights_w_per_sqft"]), style=lpd_style_template)
+        _set_numeric_cell(row, f"{epd_col}{row_number}", float(space_data["equip_w_per_sqft"]), style=epd_style_template)
+        _set_numeric_cell(row, f"{occ_col}{row_number}", float(space_data["people"]), style=occ_style_template)
     qaqc_row = _apply_space_type_qaqc_model_run_status_xml(sheet_data, model_run_type)
+    qaqc_status = bool(master_space_name_match)
+    qaqc_status_row = _ensure_row(sheet_data, qaqc_row)
+    _set_boolean_cell(qaqc_status_row, f"{SPACE_TYPE_QAQC_STATUS_COLUMN}{qaqc_row}", qaqc_status)
     file_map[MASTER_ROOM_LIST_SHEET_XML_PATH] = ET.tostring(sheet_root, encoding="utf-8", xml_declaration=True)
+    file_map[RAW_DATA_EQ_IMPORT_SHEET_XML_PATH] = ET.tostring(raw_data_root, encoding="utf-8", xml_declaration=True)
     _write_utility_rate_table_from_es_d(file_map, es_d_result)
     _save_zip_file_map(file_map, output_workbook_path)
     return {
@@ -896,8 +1000,13 @@ def populate_master_room_list_space_type_table(
         "spaces_found": len(spaces),
         "spaces_written": min(len(spaces), max_rows),
         "spaces_truncated": max(len(spaces) - max_rows, 0),
+        "space_names_previously_present": has_existing_space_names,
+        "space_name_check_passed": master_space_name_match,
+        "raw_data_import_updated": True,
+        "raw_data_target_columns": [lpd_col, epd_col, occ_col],
         "utilities_updated": True,
         "space_type_qaqc_updated": True,
+        "space_type_qaqc_status": qaqc_status,
         "space_type_qaqc_true_row": qaqc_row,
         "output_workbook": str(output_workbook_path),
     }
@@ -1037,7 +1146,7 @@ def populate_ecm_data_from_reports(
 
 
 def check_master_room_list_space_type_table_match(sim_text: str, workbook_path: Path) -> Dict[str, object]:
-    """Compare LV-B spaces against existing Master Room List Space Type Table values."""
+    """Compare LV-B space names against existing Master Room List Space Type Table values."""
     lv_b_result = extract_lv_b_spaces(sim_text)
     expected_spaces = list(lv_b_result["spaces"].items())[:MASTER_ROOM_LIST_SPACE_MAX_ROWS]
     if load_workbook is not None:
@@ -1048,23 +1157,17 @@ def check_master_room_list_space_type_table_match(sim_text: str, workbook_path: 
         for index in range(MASTER_ROOM_LIST_SPACE_MAX_ROWS):
             row_number = MASTER_ROOM_LIST_SPACE_START_ROW + index
             existing_name = sheet[f"D{row_number}"].value
-            existing_area = sheet[f"G{row_number}"].value
             existing_name = str(existing_name).strip() if existing_name is not None else ""
-            existing_area = float(existing_area) if existing_area is not None else None
             if index < len(expected_spaces):
-                expected_name, expected_space_data = expected_spaces[index]
-                expected_area = float(expected_space_data["area_sqft"])
+                expected_name, _ = expected_spaces[index]
                 compared_rows += 1
                 name_matches = existing_name == expected_name
-                area_matches = existing_area is not None and abs(existing_area - expected_area) < 1e-6
-                if not (name_matches and area_matches):
+                if not name_matches:
                     mismatches.append(
                         {
                             "row": row_number,
                             "expected_space_name": expected_name,
                             "existing_space_name": existing_name,
-                            "expected_area_sqft": expected_area,
-                            "existing_area_sqft": existing_area,
                         }
                     )
         return {
@@ -1087,24 +1190,18 @@ def check_master_room_list_space_type_table_match(sim_text: str, workbook_path: 
         row_number = MASTER_ROOM_LIST_SPACE_START_ROW + index
         row = sheet_data.find(f"m:row[@r='{row_number}']", NS)
         existing_name = ""
-        existing_area = None
         if row is not None:
             existing_name = _read_cell_text(row, f"D{row_number}").strip()
-            existing_area = _read_cell_float(row, f"G{row_number}")
         if index < len(expected_spaces):
-            expected_name, expected_space_data = expected_spaces[index]
-            expected_area = float(expected_space_data["area_sqft"])
+            expected_name, _ = expected_spaces[index]
             compared_rows += 1
             name_matches = existing_name == expected_name
-            area_matches = existing_area is not None and abs(existing_area - expected_area) < 1e-6
-            if not (name_matches and area_matches):
+            if not name_matches:
                 mismatches.append(
                     {
                         "row": row_number,
                         "expected_space_name": expected_name,
                         "existing_space_name": existing_name,
-                        "expected_area_sqft": expected_area,
-                        "existing_area_sqft": existing_area,
                     }
                 )
     return {
@@ -1511,24 +1608,13 @@ def main() -> None:
                 raise ValueError("--output-workbook is required when using --populate-master-room-list.")
             workbook_path = _resolve_input_path(str(args.populate_master_room_list), graph_client, temp_dir, "master_room") if needs_graph else args.populate_master_room_list
             output_path = _resolve_output_path(str(args.output_workbook), temp_dir) if needs_graph else args.output_workbook
-            comparison_result = check_master_room_list_space_type_table_match(
-                sim_text=sim_text,
-                workbook_path=workbook_path,
-            )
             result = populate_master_room_list_space_type_table(
                 sim_text=sim_text,
                 workbook_path=workbook_path,
                 model_run_type=model_run_type,
                 output_workbook_path=output_path,
             )
-            result.update(
-                {
-                    "model_run_type": model_run_type,
-                    "space_type_table_match": comparison_result["space_type_table_match"],
-                    "mismatch_count": comparison_result["mismatch_count"],
-                    "mismatches": comparison_result["mismatches"],
-                }
-            )
+            result["model_run_type"] = model_run_type
             if _is_onedrive_reference(str(args.output_workbook)):
                 graph_client.upload_onedrive_file(output_path, _to_onedrive_path(str(args.output_workbook)))
                 result["uploaded_output_workbook"] = str(args.output_workbook)

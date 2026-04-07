@@ -7,6 +7,7 @@ from pathlib import Path
 
 from run_local import build_command
 from equest_extractor import (
+    _parse_xml_with_registered_namespaces,
     _is_onedrive_reference,
     _to_onedrive_path,
     check_master_room_list_space_type_table_match,
@@ -83,17 +84,17 @@ class TestBepsExtractor(unittest.TestCase):
         self.assertEqual(result["report"], "BEPS")
 
     def test_lv_b_space_count_matches_sample_sim(self):
-        sim_text = Path("St Anselm Baseline ABS_Rev_0 - Baseline Design.SIM").read_text(errors="ignore")
+        sim_text = Path("sample_data/St Anselm Baseline ABS_Rev_0 - Baseline Design.SIM").read_text(errors="ignore")
         result = extract_lv_b_spaces(sim_text)
         self.assertEqual(result["space_count"], 172)
 
     def test_lv_d_extracts_expected_summary_rows_from_sample_sim(self):
-        sim_text = Path("St Anselm Baseline ABS_Rev_0 - Baseline Design.SIM").read_text(errors="ignore")
+        sim_text = Path("sample_data/St Anselm Baseline ABS_Rev_0 - Baseline Design.SIM").read_text(errors="ignore")
         result = extract_lv_d_report(sim_text)
         self.assertEqual(result["missing_orientations"], [])
 
     def test_lv_i_extracts_from_sample_sim(self):
-        sim_text = Path("St Anselm Baseline ABS_Rev_0 - Baseline Design.SIM").read_text(errors="ignore")
+        sim_text = Path("sample_data/St Anselm Baseline ABS_Rev_0 - Baseline Design.SIM").read_text(errors="ignore")
         result = extract_lv_i_constructions(sim_text)
         self.assertIn("0EWall Construction", result["constructions"])
 
@@ -170,13 +171,13 @@ class TestBepsExtractor(unittest.TestCase):
         self.assertEqual(result["utility_rates"]["Gas"]["unit"], "THERM")
 
     def test_es_d_extracts_from_sample_sim(self):
-        sim_text = Path("St Anselm Baseline ABS_Rev_0 - Baseline Design.SIM").read_text(errors="ignore")
+        sim_text = Path("sample_data/St Anselm Baseline ABS_Rev_0 - Baseline Design.SIM").read_text(errors="ignore")
         result = extract_es_d_energy_cost_summary(sim_text)
         self.assertEqual(result["utility_rates"]["Elec"]["virtual_rate"], 0.17)
         self.assertEqual(result["utility_rates"]["Gas"]["total_charge"], 59056.0)
 
     def test_ps_h_extracts_loops_pumps_and_equipment(self):
-        sim_text = Path("St Anselm Baseline ABS_Rev_0 - Baseline Design.SIM").read_text(errors="ignore")
+        sim_text = Path("sample_data/St Anselm Baseline ABS_Rev_0 - Baseline Design.SIM").read_text(errors="ignore")
         result = extract_ps_h_details(sim_text)
 
         self.assertEqual(result["loops"]["HW Loop"]["heating_capacity"], -1.84)
@@ -187,7 +188,7 @@ class TestBepsExtractor(unittest.TestCase):
         self.assertEqual(result["equipment"]["HW Boiler 1"]["heat_hir"], 1.3333)
 
     def test_populates_master_room_list_space_type_table(self):
-        workbook_path = Path("output_files/Building Performance Assumptions-v2.xlsm")
+        workbook_path = Path("Building Performance Assumptions-v2.xlsm")
         sim_text = """
         REPORT- LV-B Summary of Spaces
         Spaces on floor: Level 1
@@ -226,21 +227,25 @@ class TestBepsExtractor(unittest.TestCase):
                 sheet_payload = workbook_zip.read("xl/worksheets/sheet1.xml")
                 sheet = ET.fromstring(sheet_payload)
                 utility_sheet = ET.fromstring(workbook_zip.read("xl/worksheets/sheet7.xml"))
+                raw_data_sheet = ET.fromstring(workbook_zip.read("xl/worksheets/sheet22.xml"))
             ns = {"m": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
             d16 = sheet.find(".//m:c[@r='D16']", ns)
             g16 = sheet.find(".//m:c[@r='G16']/m:v", ns)
-            h16 = sheet.find(".//m:c[@r='H16']/m:v", ns)
-            i16 = sheet.find(".//m:c[@r='I16']/m:v", ns)
-            j16 = sheet.find(".//m:c[@r='J16']/m:v", ns)
+            g2 = raw_data_sheet.find(".//m:c[@r='G2']/m:v", ns)
+            h2 = raw_data_sheet.find(".//m:c[@r='H2']/m:v", ns)
+            i2 = raw_data_sheet.find(".//m:c[@r='I2']/m:v", ns)
             self.assertIsNotNone(d16)
             self.assertEqual(d16.attrib.get("t"), "inlineStr")
             d16_text = "".join(node.text or "" for node in d16.iter("{http://schemas.openxmlformats.org/spreadsheetml/2006/main}t"))
             self.assertEqual(d16_text, first_space_name)
             self.assertIsNotNone(g16)
             self.assertAlmostEqual(float(g16.text), float(first_space_data["area_sqft"]))
-            self.assertAlmostEqual(float(h16.text), float(first_space_data["lights_w_per_sqft"]))
-            self.assertAlmostEqual(float(i16.text), float(first_space_data["equip_w_per_sqft"]))
-            self.assertAlmostEqual(float(j16.text), float(first_space_data["people"]))
+            self.assertIsNotNone(g2)
+            self.assertIsNotNone(h2)
+            self.assertIsNotNone(i2)
+            self.assertAlmostEqual(float(g2.text), float(first_space_data["lights_w_per_sqft"]))
+            self.assertAlmostEqual(float(h2.text), float(first_space_data["equip_w_per_sqft"]))
+            self.assertAlmostEqual(float(i2.text), float(first_space_data["people"]))
             u4 = sheet.find(".//m:c[@r='U4']/m:v", ns)
             u5 = sheet.find(".//m:c[@r='U5']/m:v", ns)
             self.assertIsNotNone(u4)
@@ -267,8 +272,56 @@ class TestBepsExtractor(unittest.TestCase):
             self.assertIn(b"xmlns:mc=", sheet_payload)
             self.assertIn(b"mc:Ignorable=", sheet_payload)
 
+    def test_populate_master_room_list_sets_qaqc_fail_when_existing_space_names_do_not_match(self):
+        workbook_path = Path("Building Performance Assumptions-v2.xlsm")
+        sim_text = """
+        REPORT- LV-B Summary of Spaces
+        Spaces on floor: Level 1
+        010-Bike Storage                     1.0   INT   89.4    0.80    1.0    0.50   AIR-CHANGE  0.10      1038.1      12457.7
+        015-corridor                         1.0   INT    0.0    0.83    0.6    0.20   AIR-CHANGE  0.10       634.8       7617.4
+        CONDITIONED FLOOR AREA          =     107479.2  SQFT
+        REPORT- ES-D Energy Cost Summary
+        UTILITY-RATE                       RESOURCE           METERS              UNITS/YR               ($)     ($/UNIT)   ALL YEAR?
+        Elec                               ELECTRICITY        EM1   COMM       636613. KWH           108224.       0.1700      YES
+        Gas                                NATURAL-GAS        FM1               50910. THERM          59056.       1.1600      YES
+        REPORT- END
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            input_path = Path(temp_dir) / "mutated_input.xlsm"
+            with zipfile.ZipFile(workbook_path, "r") as src_zip:
+                file_map = {name: src_zip.read(name) for name in src_zip.namelist()}
+            sheet_root = _parse_xml_with_registered_namespaces(file_map["xl/worksheets/sheet1.xml"])
+            ns = {"m": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+            row_16 = sheet_root.find(".//m:row[@r='16']", ns)
+            d16 = row_16.find("m:c[@r='D16']", ns)
+            if d16 is None:
+                d16 = ET.SubElement(row_16, "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}c", {"r": "D16", "t": "inlineStr"})
+            for child in list(d16):
+                d16.remove(child)
+            is_node = ET.SubElement(d16, "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}is")
+            t_node = ET.SubElement(is_node, "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}t")
+            t_node.text = "Different Space Name"
+            file_map["xl/worksheets/sheet1.xml"] = ET.tostring(sheet_root, encoding="utf-8", xml_declaration=True)
+            with zipfile.ZipFile(input_path, "w", compression=zipfile.ZIP_DEFLATED) as out_zip:
+                for name, payload in file_map.items():
+                    out_zip.writestr(name, payload)
+            output_path = Path(temp_dir) / "mutated_output.xlsm"
+            result = populate_master_room_list_space_type_table(
+                sim_text=sim_text,
+                workbook_path=input_path,
+                model_run_type="Baseline",
+                output_workbook_path=output_path,
+            )
+            self.assertFalse(result["space_name_check_passed"])
+            self.assertFalse(result["space_type_qaqc_status"])
+            with zipfile.ZipFile(output_path, "r") as workbook_zip:
+                output_sheet = ET.fromstring(workbook_zip.read("xl/worksheets/sheet1.xml"))
+            u4 = output_sheet.find(".//m:c[@r='U4']/m:v", ns)
+            self.assertIsNotNone(u4)
+            self.assertEqual(u4.text, "0")
+
     def test_non_baseline_comparison_returns_true_when_matching(self):
-        sim_text = Path("St Anselm Baseline ABS_Rev_0 - Baseline Design.SIM").read_text(errors="ignore")
+        sim_text = Path("sample_data/St Anselm Baseline ABS_Rev_0 - Baseline Design.SIM").read_text(errors="ignore")
         workbook_path = Path("Building Performance Assumptions.xlsm")
         with tempfile.TemporaryDirectory() as temp_dir:
             populated_path = Path(temp_dir) / "baseline_populated.xlsm"
@@ -286,7 +339,7 @@ class TestBepsExtractor(unittest.TestCase):
             self.assertEqual(comparison["mismatch_count"], 0)
 
     def test_non_baseline_comparison_returns_false_when_different(self):
-        sim_text = Path("St Anselm Baseline ABS_Rev_0 - Baseline Design.SIM").read_text(errors="ignore")
+        sim_text = Path("sample_data/St Anselm Baseline ABS_Rev_0 - Baseline Design.SIM").read_text(errors="ignore")
         workbook_path = Path("Building Performance Assumptions.xlsm")
         lv_b_result = extract_lv_b_spaces(sim_text)
         first_space_name, first_space_data = next(iter(lv_b_result["spaces"].items()))
@@ -334,7 +387,7 @@ class TestBepsExtractor(unittest.TestCase):
         FM1  NATURAL-GAS
             MBTU          0.0      0.0      0.0   2702.0      0.0      0.0      0.0      0.0      0.0      0.0   2389.0      0.0    5091.0
         """
-        workbook_path = Path("output_files/Building Performance Assumptions-v2.xlsm")
+        workbook_path = Path("Building Performance Assumptions-v2.xlsm")
         with tempfile.TemporaryDirectory() as temp_dir:
             output_path = Path(temp_dir) / "ecm_updated.xlsm"
             result = populate_ecm_data_from_reports(
@@ -382,7 +435,7 @@ class TestBepsExtractor(unittest.TestCase):
         Office Lights  FRACTION       WD      WD      WD       WD         WD        WD      WE        WE       WD       WE       YES            0  0  0  0  0  0  0.2  0.5  0.8  1.0  1.0  1.0  1.0  1.0  1.0  1.0  0.8  0.6  0.5  0.4  0.2  0.1  0  0
         REPORT- END
         """
-        workbook_path = Path("output_files/Building Performance Assumptions-v2.xlsm")
+        workbook_path = Path("Building Performance Assumptions-v2.xlsm")
         with tempfile.TemporaryDirectory() as temp_dir:
             output_path = Path(temp_dir) / "schedule_updated.xlsm"
             result = populate_equest_schedule_importer_table(
