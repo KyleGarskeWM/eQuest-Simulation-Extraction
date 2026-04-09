@@ -82,11 +82,12 @@ def build_command(config: dict) -> list[str]:
     return command
 
 
-def build_combined_commands(config: dict, master_output_path: str, ecm_output_path: str) -> list[list[str]]:
+def build_combined_commands(config: dict, master_output_path: str) -> list[list[str]]:
     """Build two-step command list: Master Room List -> ECM Data."""
     combined_model_run_type = resolve_model_run_type(config, "Baseline")
     sim_file = config["sim_file"]
     workbook_path = config["workbook_path"]
+    output_workbook_path = config["output_workbook_path"]
     return [
         [
             sys.executable,
@@ -108,7 +109,7 @@ def build_combined_commands(config: dict, master_output_path: str, ecm_output_pa
             "--model-run-type",
             combined_model_run_type,
             "--output-workbook",
-            ecm_output_path,
+            output_workbook_path,
         ],
     ]
 
@@ -148,11 +149,9 @@ def main() -> None:
     if mode == "combined":
         with tempfile.TemporaryDirectory() as temp_dir:
             master_intermediate_output = str(Path(temp_dir) / "master_room_intermediate.xlsm")
-            ecm_intermediate_output = str(Path(temp_dir) / "ecm_intermediate.xlsm")
             commands = build_combined_commands(
                 config,
                 master_output_path=master_intermediate_output,
-                ecm_output_path=ecm_intermediate_output,
             )
             for command in commands:
                 result = run_command(command, process_env=process_env, cwd=script_dir)
