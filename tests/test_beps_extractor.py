@@ -8,6 +8,8 @@ from unittest.mock import patch
 
 from run_local import build_command
 from equest_extractor import (
+    _coerce_finite_float,
+    _remove_calc_chain_parts,
     _sanitize_xml_text,
     _parse_xml_with_registered_namespaces,
     _is_onedrive_reference,
@@ -32,6 +34,35 @@ from equest_extractor import (
 
 
 class TestBepsExtractor(unittest.TestCase):
+    def test_coerce_finite_float_rejects_non_finite_values(self):
+        self.assertEqual(_coerce_finite_float("12.5"), 12.5)
+        self.assertIsNone(_coerce_finite_float("nan"))
+        self.assertIsNone(_coerce_finite_float("inf"))
+        self.assertIsNone(_coerce_finite_float("-inf"))
+
+    def test_remove_calc_chain_parts_removes_workbook_references(self):
+        content_types = b"""<?xml version="1.0" encoding="UTF-8"?>
+        <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+          <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+          <Override PartName="/xl/calcChain.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.calcChain+xml"/>
+        </Types>"""
+        workbook_rels = b"""<?xml version="1.0" encoding="UTF-8"?>
+        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+          <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+          <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/calcChain" Target="calcChain.xml"/>
+        </Relationships>"""
+        file_map = {
+            "xl/calcChain.xml": b"<calcChain/>",
+            "xl/_rels/workbook.xml.rels": workbook_rels,
+            "[Content_Types].xml": content_types,
+        }
+        _remove_calc_chain_parts(file_map)
+        self.assertNotIn("xl/calcChain.xml", file_map)
+        rels_text = file_map["xl/_rels/workbook.xml.rels"].decode("utf-8")
+        self.assertNotIn("calcChain.xml", rels_text)
+        content_types_text = file_map["[Content_Types].xml"].decode("utf-8")
+        self.assertNotIn("/xl/calcChain.xml", content_types_text)
+
     def test_sanitize_xml_text_removes_invalid_control_characters(self):
         raw = "Room\x0bName\x00With\x1fControls"
         self.assertEqual(_sanitize_xml_text(raw), "RoomNameWithControls")
