@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import math
 import os
 import re
 import tempfile
@@ -596,9 +597,22 @@ def _set_numeric_cell(row: ET.Element, cell_ref: str, value: float | None, style
     for child in list(cell):
         cell.remove(child)
     cell.attrib.pop("t", None)
-    if value is not None:
+    numeric_value = _coerce_finite_float(value)
+    if numeric_value is not None:
         v_node = ET.SubElement(cell, f"{{{MAIN_NS}}}v")
-        v_node.text = f"{value:.6f}".rstrip("0").rstrip(".")
+        v_node.text = f"{numeric_value:.6f}".rstrip("0").rstrip(".")
+
+
+def _coerce_finite_float(value: object) -> float | None:
+    if value is None:
+        return None
+    try:
+        numeric_value = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(numeric_value):
+        return None
+    return numeric_value
 
 
 def _set_boolean_cell(row: ET.Element, cell_ref: str, value: bool, style: str | None = None) -> None:
@@ -667,6 +681,35 @@ def _serialize_xml_preserving_ignorable_prefixes(root: ET.Element, original_xml_
             continue
         root_start += f' xmlns:{prefix}="{uri}"'
     return f"{root_start}{root_end}".encode("utf-8")
+
+
+def _remove_calc_chain_parts(file_map: Dict[str, bytes]) -> None:
+    calc_chain_path = "xl/calcChain.xml"
+    workbook_rels_path = "xl/_rels/workbook.xml.rels"
+    content_types_path = "[Content_Types].xml"
+    removed = file_map.pop(calc_chain_path, None) is not None
+    if not removed:
+        return
+    if workbook_rels_path in file_map:
+        rels_root = _parse_xml_with_registered_namespaces(file_map[workbook_rels_path])
+        relationships_to_remove = []
+        for relationship in rels_root.findall(".//{*}Relationship"):
+            target = relationship.attrib.get("Target", "")
+            rel_type = relationship.attrib.get("Type", "")
+            if target == "calcChain.xml" or rel_type.endswith("/calcChain"):
+                relationships_to_remove.append(relationship)
+        for relationship in relationships_to_remove:
+            rels_root.remove(relationship)
+        file_map[workbook_rels_path] = ET.tostring(rels_root, encoding="utf-8", xml_declaration=True)
+    if content_types_path in file_map:
+        content_types_root = _parse_xml_with_registered_namespaces(file_map[content_types_path])
+        overrides_to_remove = []
+        for override in content_types_root.findall(".//{*}Override"):
+            if override.attrib.get("PartName") == "/xl/calcChain.xml":
+                overrides_to_remove.append(override)
+        for override in overrides_to_remove:
+            content_types_root.remove(override)
+        file_map[content_types_path] = ET.tostring(content_types_root, encoding="utf-8", xml_declaration=True)
 
 
 def _to_kbtu(value: float, from_unit: str) -> float:
@@ -1005,6 +1048,7 @@ def populate_master_room_list_space_type_table(
         file_map[RAW_DATA_EQ_IMPORT_SHEET_XML_PATH],
     )
     _write_utility_rate_table_from_es_d(file_map, es_d_result)
+    _remove_calc_chain_parts(file_map)
     _save_zip_file_map(file_map, output_workbook_path)
     return {
         "target_sheet": "Raw Data - eQuest Import",
@@ -1137,6 +1181,7 @@ def populate_ecm_data_from_reports(
         sheet_root,
         file_map[ECM_DATA_SHEET_XML_PATH],
     )
+    _remove_calc_chain_parts(file_map)
     _save_zip_file_map(file_map, output_workbook_path)
     return {
         "sheet": "ECM Data",
@@ -1663,15 +1708,51 @@ def populate_equest_schedule_importer_table(
         row_data = _normalize_schedule_row(rows[idx]) if idx < len(rows) else {}
         _set_inline_string_cell(row, f"A{row_number}", row_data.get("Schedule Name", ""))
         _set_inline_string_cell(row, f"B{row_number}", row_data.get("Schedule Type", ""))
+        day_columns = {
+            "Sunday": "C",
+            "Monday": "D",
+            "Tuesday": "E",
+            "Wednesday": "F",
+            "Thursday": "G",
+            "Friday": "H",
+            "Saturday": "I",
+        }
+        day_flags = _for_days_flags(str(row_data.get("FOR_DAYS", "")))
+        for day_name, col in day_columns.items():
+            existing_day_value = str(row_data.get(day_name, "")).strip().upper()
+            if existing_day_value not in {"", "0", "N", "NO"}:
+                day_flags[day_name] = "X"
+            _set_inline_string_cell(row, f"{col}{row_number}", day_flags[day_name])
+        _set_inline_string_cell(
+            row,
+            f"J{row_number}",
+            "X" if str(row_data.get("Holiday", "")).strip().upper() not in {"", "0", "N", "NO"} else "",
+        )
+        _set_inline_string_cell(
+            row,
+            f"K{row_number}",
+            "X" if str(row_data.get("Weekday", "")).strip().upper() not in {"", "0", "N", "NO"} else "",
+        )
+        _set_inline_string_cell(
+            row,
+            f"L{row_number}",
+            "X" if str(row_data.get("Weekend", "")).strip().upper() not in {"", "0", "N", "NO"} else "",
+        )
+        _set_inline_string_cell(
+            row,
+            f"M{row_number}",
+            "X" if str(row_data.get("Holiday Check", "")).strip().upper() not in {"", "0", "N", "NO"} else "",
+        )
         for hour in range(1, 25):
             col = _excel_column_name(13 + hour)
             value = row_data.get(str(hour))
-            numeric_value = float(value) if value not in (None, "") else None
+            numeric_value = _coerce_finite_float(value)
             _set_numeric_cell(row, f"{col}{row_number}", numeric_value)
     file_map[schedule_sheet_path] = _serialize_xml_preserving_ignorable_prefixes(
         sheet_root,
         file_map[schedule_sheet_path],
     )
+    _remove_calc_chain_parts(file_map)
     _save_zip_file_map(file_map, output_workbook_path)
     return {
         "target_sheet": "eQuest Schedule Importer",
