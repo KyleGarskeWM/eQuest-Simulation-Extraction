@@ -267,111 +267,62 @@ class TestBepsExtractor(unittest.TestCase):
         lv_b_result = extract_lv_b_spaces(sim_text)
         first_space_name, first_space_data = next(iter(lv_b_result["spaces"].items()))
         with tempfile.TemporaryDirectory() as temp_dir:
-            output_path = Path(temp_dir) / "Building Performance Assumptions.updated.xlsm"
-            result = populate_master_room_list_space_type_table(
-                sim_text=sim_text,
-                workbook_path=workbook_path,
-                model_run_type="Baseline",
-                output_workbook_path=output_path,
-            )
-            self.assertEqual(result["spaces_written"], 2)
-            self.assertTrue(result["space_type_qaqc_updated"])
-            with zipfile.ZipFile(output_path, "r") as workbook_zip:
-                sheet_payload = workbook_zip.read("xl/worksheets/sheet1.xml")
-                sheet = ET.fromstring(sheet_payload)
-                utility_sheet = ET.fromstring(workbook_zip.read("xl/worksheets/sheet7.xml"))
-                raw_data_sheet = ET.fromstring(workbook_zip.read("xl/worksheets/sheet22.xml"))
-            ns = {"m": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
-            d16 = sheet.find(".//m:c[@r='D16']", ns)
-            g16 = sheet.find(".//m:c[@r='G16']/m:v", ns)
-            g2 = raw_data_sheet.find(".//m:c[@r='G2']/m:v", ns)
-            h2 = raw_data_sheet.find(".//m:c[@r='H2']/m:v", ns)
-            i2 = raw_data_sheet.find(".//m:c[@r='I2']/m:v", ns)
-            self.assertIsNotNone(d16)
-            self.assertEqual(d16.attrib.get("t"), "inlineStr")
-            d16_text = "".join(node.text or "" for node in d16.iter("{http://schemas.openxmlformats.org/spreadsheetml/2006/main}t"))
-            self.assertEqual(d16_text, first_space_name)
-            self.assertIsNotNone(g16)
-            self.assertAlmostEqual(float(g16.text), float(first_space_data["area_sqft"]))
-            self.assertIsNotNone(g2)
-            self.assertIsNotNone(h2)
-            self.assertIsNotNone(i2)
-            self.assertAlmostEqual(float(g2.text), float(first_space_data["lights_w_per_sqft"]))
-            self.assertAlmostEqual(float(h2.text), float(first_space_data["equip_w_per_sqft"]))
-            self.assertAlmostEqual(float(i2.text), float(first_space_data["people"]))
-            u4 = sheet.find(".//m:c[@r='U4']/m:v", ns)
-            u5 = sheet.find(".//m:c[@r='U5']/m:v", ns)
-            self.assertIsNotNone(u4)
-            self.assertEqual(u4.text, "1")
-            self.assertIsNotNone(u5)
-            self.assertEqual(u5.text, "0")
-            b2 = utility_sheet.find(".//m:c[@r='B2']", ns)
-            c2 = utility_sheet.find(".//m:c[@r='C2']", ns)
-            d2 = utility_sheet.find(".//m:c[@r='D2']", ns)
-            self.assertIsNotNone(b2)
-            self.assertIsNotNone(c2)
-            self.assertIsNotNone(d2)
-            b2_text = "".join(node.text or "" for node in b2.iter("{http://schemas.openxmlformats.org/spreadsheetml/2006/main}t"))
-            c2_text = "".join(node.text or "" for node in c2.iter("{http://schemas.openxmlformats.org/spreadsheetml/2006/main}t"))
-            d2_value = d2.find("{http://schemas.openxmlformats.org/spreadsheetml/2006/main}v")
-            self.assertEqual(b2_text, "Electrical")
-            self.assertEqual(c2_text.upper(), "KWH")
-            self.assertAlmostEqual(float(d2_value.text), 0.17, places=4)
-            d66 = sheet.find(".//m:c[@r='D66']", ns)
-            if d66 is not None:
-                d66_text = "".join(node.text or "" for node in d66.iter("{http://schemas.openxmlformats.org/spreadsheetml/2006/main}t"))
-                self.assertEqual(d66_text, "")
-            # Ensure core compatibility namespace metadata is preserved to avoid Excel repair/recovery.
-            self.assertIn(b"xmlns:mc=", sheet_payload)
-            self.assertIn(b"mc:Ignorable=", sheet_payload)
-
-    def test_populate_master_room_list_sets_qaqc_fail_when_existing_space_names_do_not_match(self):
-        workbook_path = Path("Building Performance Assumptions-v2.xlsm")
-        sim_text = """
-        REPORT- LV-B Summary of Spaces
-        Spaces on floor: Level 1
-        010-Bike Storage                     1.0   INT   89.4    0.80    1.0    0.50   AIR-CHANGE  0.10      1038.1      12457.7
-        015-corridor                         1.0   INT    0.0    0.83    0.6    0.20   AIR-CHANGE  0.10       634.8       7617.4
-        CONDITIONED FLOOR AREA          =     107479.2  SQFT
-        REPORT- ES-D Energy Cost Summary
-        UTILITY-RATE                       RESOURCE           METERS              UNITS/YR               ($)     ($/UNIT)   ALL YEAR?
-        Elec                               ELECTRICITY        EM1   COMM       636613. KWH           108224.       0.1700      YES
-        Gas                                NATURAL-GAS        FM1               50910. THERM          59056.       1.1600      YES
-        REPORT- END
-        """
-        with tempfile.TemporaryDirectory() as temp_dir:
-            input_path = Path(temp_dir) / "mutated_input.xlsm"
+            input_path = Path(temp_dir) / "Building Performance Assumptions.input.xlsm"
             with zipfile.ZipFile(workbook_path, "r") as src_zip:
                 file_map = {name: src_zip.read(name) for name in src_zip.namelist()}
-            sheet_root = _parse_xml_with_registered_namespaces(file_map["xl/worksheets/sheet1.xml"])
+            raw_root = _parse_xml_with_registered_namespaces(file_map["xl/worksheets/sheet22.xml"])
             ns = {"m": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
-            row_16 = sheet_root.find(".//m:row[@r='16']", ns)
-            d16 = row_16.find("m:c[@r='D16']", ns)
-            if d16 is None:
-                d16 = ET.SubElement(row_16, "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}c", {"r": "D16", "t": "inlineStr"})
-            for child in list(d16):
-                d16.remove(child)
-            is_node = ET.SubElement(d16, "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}is")
-            t_node = ET.SubElement(is_node, "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}t")
-            t_node.text = "Different Space Name"
-            file_map["xl/worksheets/sheet1.xml"] = ET.tostring(sheet_root, encoding="utf-8", xml_declaration=True)
+            for row_number in range(2, 301):
+                row = raw_root.find(f".//m:row[@r='{row_number}']", ns)
+                if row is None:
+                    continue
+                c_cell = row.find(f"m:c[@r='C{row_number}']", ns)
+                if c_cell is not None:
+                    for child in list(c_cell):
+                        c_cell.remove(child)
+                    c_cell.attrib["t"] = "inlineStr"
+                    is_node = ET.SubElement(c_cell, "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}is")
+                    ET.SubElement(is_node, "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}t")
+            file_map["xl/worksheets/sheet22.xml"] = ET.tostring(raw_root, encoding="utf-8", xml_declaration=True)
             with zipfile.ZipFile(input_path, "w", compression=zipfile.ZIP_DEFLATED) as out_zip:
                 for name, payload in file_map.items():
                     out_zip.writestr(name, payload)
-            output_path = Path(temp_dir) / "mutated_output.xlsm"
+            output_path = Path(temp_dir) / "Building Performance Assumptions.updated.xlsm"
             result = populate_master_room_list_space_type_table(
                 sim_text=sim_text,
                 workbook_path=input_path,
                 model_run_type="Baseline",
                 output_workbook_path=output_path,
             )
-            self.assertFalse(result["space_name_check_passed"])
-            self.assertFalse(result["space_type_qaqc_status"])
+            self.assertEqual(result["spaces_written"], 2)
             with zipfile.ZipFile(output_path, "r") as workbook_zip:
-                output_sheet = ET.fromstring(workbook_zip.read("xl/worksheets/sheet1.xml"))
-            u4 = output_sheet.find(".//m:c[@r='U4']/m:v", ns)
-            self.assertIsNotNone(u4)
-            self.assertEqual(u4.text, "0")
+                utility_sheet = ET.fromstring(workbook_zip.read("xl/worksheets/sheet7.xml"))
+                raw_data_sheet = ET.fromstring(workbook_zip.read("xl/worksheets/sheet22.xml"))
+            c2 = raw_data_sheet.find(".//m:c[@r='C2']", ns)
+            g2 = raw_data_sheet.find(".//m:c[@r='G2']/m:v", ns)
+            h2 = raw_data_sheet.find(".//m:c[@r='H2']/m:v", ns)
+            i2 = raw_data_sheet.find(".//m:c[@r='I2']/m:v", ns)
+            self.assertIsNotNone(c2)
+            self.assertIsNotNone(g2)
+            self.assertIsNotNone(h2)
+            self.assertIsNotNone(i2)
+            c2_text = "".join(node.text or "" for node in c2.iter("{http://schemas.openxmlformats.org/spreadsheetml/2006/main}t"))
+            self.assertEqual(c2_text, first_space_name)
+            self.assertAlmostEqual(float(g2.text), float(first_space_data["lights_w_per_sqft"]))
+            self.assertAlmostEqual(float(h2.text), float(first_space_data["equip_w_per_sqft"]))
+            self.assertAlmostEqual(float(i2.text), float(first_space_data["people"]))
+            b2 = utility_sheet.find(".//m:c[@r='B2']", ns)
+            c2_utility = utility_sheet.find(".//m:c[@r='C2']", ns)
+            d2 = utility_sheet.find(".//m:c[@r='D2']", ns)
+            self.assertIsNotNone(b2)
+            self.assertIsNotNone(c2_utility)
+            self.assertIsNotNone(d2)
+            b2_text = "".join(node.text or "" for node in b2.iter("{http://schemas.openxmlformats.org/spreadsheetml/2006/main}t"))
+            c2_utility_text = "".join(node.text or "" for node in c2_utility.iter("{http://schemas.openxmlformats.org/spreadsheetml/2006/main}t"))
+            d2_value = d2.find("{http://schemas.openxmlformats.org/spreadsheetml/2006/main}v")
+            self.assertEqual(b2_text, "Electrical")
+            self.assertEqual(c2_utility_text.upper(), "KWH")
+            self.assertAlmostEqual(float(d2_value.text), 0.17, places=4)
 
     def test_non_baseline_comparison_returns_true_when_matching(self):
         sim_text = Path("sample_data/St Anselm Baseline ABS_Rev_0 - Baseline Design.SIM").read_text(errors="ignore")
@@ -390,6 +341,63 @@ class TestBepsExtractor(unittest.TestCase):
             )
             self.assertTrue(comparison["space_type_table_match"])
             self.assertEqual(comparison["mismatch_count"], 0)
+
+    def test_populate_master_room_list_matches_existing_raw_space_rows_without_overwriting_names(self):
+        workbook_path = Path("Building Performance Assumptions-v2.xlsm")
+        sim_text = """
+        REPORT- LV-B Summary of Spaces
+        Spaces on floor: Level 1
+        Space A                              1.0   INT   10.0    0.80    0.1    0.50   AIR-CHANGE  0.10      100.0      1000.0
+        Space B                              1.0   INT   20.0    0.90    0.2    0.50   AIR-CHANGE  0.10      200.0      1000.0
+        CONDITIONED FLOOR AREA          =       300.0  SQFT
+        REPORT- ES-D Energy Cost Summary
+        UTILITY-RATE                       RESOURCE           METERS              UNITS/YR               ($)     ($/UNIT)   ALL YEAR?
+        Elec                               ELECTRICITY        EM1   COMM       636613. KWH           108224.       0.1700      YES
+        Gas                                NATURAL-GAS        FM1               50910. THERM          59056.       1.1600      YES
+        REPORT- END
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            input_path = Path(temp_dir) / "mutated_input.xlsm"
+            with zipfile.ZipFile(workbook_path, "r") as src_zip:
+                file_map = {name: src_zip.read(name) for name in src_zip.namelist()}
+            raw_root = _parse_xml_with_registered_namespaces(file_map["xl/worksheets/sheet22.xml"])
+            ns = {"m": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+            row_2 = raw_root.find(".//m:row[@r='2']", ns)
+            row_3 = raw_root.find(".//m:row[@r='3']", ns)
+            c2 = row_2.find("m:c[@r='C2']", ns)
+            c3 = row_3.find("m:c[@r='C3']", ns)
+            for cell, text in ((c2, "Space B"), (c3, "Space A")):
+                for child in list(cell):
+                    cell.remove(child)
+                cell.attrib["t"] = "inlineStr"
+                is_node = ET.SubElement(cell, "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}is")
+                t_node = ET.SubElement(is_node, "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}t")
+                t_node.text = text
+            file_map["xl/worksheets/sheet22.xml"] = ET.tostring(raw_root, encoding="utf-8", xml_declaration=True)
+            with zipfile.ZipFile(input_path, "w", compression=zipfile.ZIP_DEFLATED) as out_zip:
+                for name, payload in file_map.items():
+                    out_zip.writestr(name, payload)
+            output_path = Path(temp_dir) / "mutated_output.xlsm"
+            result = populate_master_room_list_space_type_table(
+                sim_text=sim_text,
+                workbook_path=input_path,
+                model_run_type="Baseline",
+                output_workbook_path=output_path,
+            )
+            self.assertTrue(result["raw_space_names_previously_present"])
+            self.assertEqual(result["matched_existing_spaces"], 2)
+            with zipfile.ZipFile(output_path, "r") as workbook_zip:
+                output_raw = ET.fromstring(workbook_zip.read("xl/worksheets/sheet22.xml"))
+            c2_out = output_raw.find(".//m:c[@r='C2']", ns)
+            c3_out = output_raw.find(".//m:c[@r='C3']", ns)
+            g2_out = output_raw.find(".//m:c[@r='G2']/m:v", ns)
+            g3_out = output_raw.find(".//m:c[@r='G3']/m:v", ns)
+            c2_text = "".join(node.text or "" for node in c2_out.iter("{http://schemas.openxmlformats.org/spreadsheetml/2006/main}t"))
+            c3_text = "".join(node.text or "" for node in c3_out.iter("{http://schemas.openxmlformats.org/spreadsheetml/2006/main}t"))
+            self.assertEqual(c2_text, "Space B")
+            self.assertEqual(c3_text, "Space A")
+            self.assertAlmostEqual(float(g2_out.text), 0.9)
+            self.assertAlmostEqual(float(g3_out.text), 0.8)
 
     def test_non_baseline_comparison_returns_false_when_different(self):
         sim_text = Path("sample_data/St Anselm Baseline ABS_Rev_0 - Baseline Design.SIM").read_text(errors="ignore")
