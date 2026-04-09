@@ -6,7 +6,7 @@ import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
-from run_local import build_command
+from run_local import build_command, build_combined_commands
 from equest_extractor import (
     _coerce_finite_float,
     _remove_calc_chain_parts,
@@ -107,6 +107,19 @@ class TestBepsExtractor(unittest.TestCase):
                     "output_workbook_path": "c.xlsm",
                 }
             )
+
+    def test_run_local_combined_mode_uses_configured_output_workbook_path(self):
+        commands = build_combined_commands(
+            {
+                "sim_file": "a.sim",
+                "workbook_path": "input.xlsm",
+                "output_workbook_path": "final.xlsm",
+                "model_run_type": "Baseline",
+            },
+            master_output_path="intermediate.xlsm",
+        )
+        self.assertEqual(commands[0][-1], "intermediate.xlsm")
+        self.assertEqual(commands[1][-1], "final.xlsm")
 
     def test_master_room_list_write_path_skips_openpyxl_to_preserve_workbook_parts(self):
         sim_text = """
