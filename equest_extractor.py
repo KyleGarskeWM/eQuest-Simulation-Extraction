@@ -89,6 +89,7 @@ MASTER_ROOM_LIST_SPACE_START_ROW = 16
 MASTER_ROOM_LIST_SPACE_MAX_ROWS = 298
 RAW_DATA_EQ_IMPORT_SHEET_XML_PATH = "xl/worksheets/sheet22.xml"
 RAW_DATA_SPACE_START_ROW = 2
+RAW_DATA_AREA_COLUMN = "F"
 SPACE_TYPE_QAQC_TABLE_START_ROW = 4
 SPACE_TYPE_QAQC_TABLE_END_ROW = 12
 SPACE_TYPE_QAQC_MODEL_RUN_COLUMN = "T"
@@ -964,6 +965,9 @@ def populate_master_room_list_space_type_table(
                 continue
             if raw_space_names_previously_present:
                 matched_existing_spaces += 1
+            existing_area_value = raw_data_sheet[f"{RAW_DATA_AREA_COLUMN}{row_number}"].value
+            if existing_area_value in (None, ""):
+                raw_data_sheet[f"{RAW_DATA_AREA_COLUMN}{row_number}"] = float(space_data["area_sqft"])
             raw_data_sheet[f"{lpd_col}{row_number}"] = float(space_data["lights_w_per_sqft"])
             raw_data_sheet[f"{epd_col}{row_number}"] = float(space_data["equip_w_per_sqft"])
             raw_data_sheet[f"{occ_col}{row_number}"] = float(space_data["people"])
@@ -1038,6 +1042,7 @@ def populate_master_room_list_space_type_table(
     lpd_style_template = None
     epd_style_template = None
     occ_style_template = None
+    area_style_template = None
     lpd_template_cell = raw_data_root.find(f".//m:c[@r='{lpd_col}{RAW_DATA_SPACE_START_ROW}']", NS)
     epd_template_cell = raw_data_root.find(f".//m:c[@r='{epd_col}{RAW_DATA_SPACE_START_ROW}']", NS)
     occ_template_cell = raw_data_root.find(f".//m:c[@r='{occ_col}{RAW_DATA_SPACE_START_ROW}']", NS)
@@ -1047,6 +1052,9 @@ def populate_master_room_list_space_type_table(
         epd_style_template = epd_template_cell.attrib.get("s")
     if occ_template_cell is not None:
         occ_style_template = occ_template_cell.attrib.get("s")
+    area_template_cell = raw_data_root.find(f".//m:c[@r='{RAW_DATA_AREA_COLUMN}{RAW_DATA_SPACE_START_ROW}']", NS)
+    if area_template_cell is not None:
+        area_style_template = area_template_cell.attrib.get("s")
     matched_existing_spaces = 0
     skipped_unmatched_spaces = 0
     for index, (space_name, space_data) in enumerate(spaces[:max_rows]):
@@ -1057,6 +1065,13 @@ def populate_master_room_list_space_type_table(
         if raw_space_names_previously_present:
             matched_existing_spaces += 1
         row = _ensure_row(raw_data_sheet_data, row_number)
+        if _read_cell_float(row, f"{RAW_DATA_AREA_COLUMN}{row_number}") is None:
+            _set_numeric_cell(
+                row,
+                f"{RAW_DATA_AREA_COLUMN}{row_number}",
+                float(space_data["area_sqft"]),
+                style=area_style_template,
+            )
         _set_numeric_cell(row, f"{lpd_col}{row_number}", float(space_data["lights_w_per_sqft"]), style=lpd_style_template)
         _set_numeric_cell(row, f"{epd_col}{row_number}", float(space_data["equip_w_per_sqft"]), style=epd_style_template)
         _set_numeric_cell(row, f"{occ_col}{row_number}", float(space_data["people"]), style=occ_style_template)
@@ -1606,192 +1621,6 @@ def extract_schedule_table(sim_text: str) -> Dict[str, object]:
     return {"report": "LV-G" if block_rows else (report_name or "SCHEDULE"), "rows": block_rows}
 
 
-def _for_days_flags(for_days_value: str) -> Dict[str, str]:
-    text = (for_days_value or "").upper()
-    tokenized = text.replace(",", " ").replace("/", " ").replace("-", " ")
-    tokens = {token for token in tokenized.split() if token}
-    flags = {day: "" for day in ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]}
-    sunday_tokens = {"SUN", "SUNDAY"}
-    monday_tokens = {"MON", "MONDAY"}
-    tuesday_tokens = {"TUE", "TUES", "TUESDAY"}
-    wednesday_tokens = {"WED", "WEDNESDAY"}
-    thursday_tokens = {"THU", "THUR", "THURS", "THURSDAY"}
-    friday_tokens = {"FRI", "FRIDAY"}
-    saturday_tokens = {"SAT", "SATURDAY"}
-    if tokens.intersection(sunday_tokens):
-        flags["Sunday"] = "X"
-    if tokens.intersection(monday_tokens):
-        flags["Monday"] = "X"
-    if tokens.intersection(tuesday_tokens):
-        flags["Tuesday"] = "X"
-    if tokens.intersection(wednesday_tokens):
-        flags["Wednesday"] = "X"
-    if tokens.intersection(thursday_tokens):
-        flags["Thursday"] = "X"
-    if tokens.intersection(friday_tokens):
-        flags["Friday"] = "X"
-    if tokens.intersection(saturday_tokens):
-        flags["Saturday"] = "X"
-    if "WEEKDAY" in text or "WEEKDAYS" in text or "WKDAY" in text or "WKDAYS" in text:
-        for day in ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]:
-            flags[day] = "X"
-    if "WEEKEND" in text or "WEEKENDS" in text or "WKEND" in text or "WKENDS" in text:
-        flags["Sunday"] = "X"
-        flags["Saturday"] = "X"
-    return flags
-
-
-def _normalize_schedule_row(row_data: Dict[str, str]) -> Dict[str, str]:
-    """Normalize schedule row keys from different parser formats."""
-    normalized: Dict[str, str] = {}
-    hour_key_pattern = re.compile(r"^\s*(\d{1,2})\s*(?:AM|PM)?\s*$", re.IGNORECASE)
-    for key, value in row_data.items():
-        canonical_key = str(key).strip()
-        canonical_key_upper = canonical_key.upper()
-        if canonical_key_upper == "SCHEDULE NAME":
-            canonical_key = "Schedule Name"
-        elif canonical_key_upper == "SCHEDULE TYPE":
-            canonical_key = "Schedule Type"
-        elif canonical_key_upper in {"FOR DAYS", "FOR_DAYS"}:
-            canonical_key = "FOR_DAYS"
-        else:
-            hour_match = hour_key_pattern.match(canonical_key_upper)
-            if hour_match:
-                hour_value = int(hour_match.group(1))
-                if 1 <= hour_value <= 24:
-                    canonical_key = str(hour_value)
-        normalized[canonical_key] = value
-    return normalized
-
-
-def _schedule_hour_value(row_data: Dict[str, str], hour: int) -> float | None:
-    value = row_data.get(str(hour))
-    if value in (None, ""):
-        hour_label = f"{hour} AM" if hour <= 11 else ("12 PM" if hour == 12 else ("24 AM" if hour == 24 else f"{hour} PM"))
-        value = row_data.get(hour_label)
-    return _coerce_finite_float(value)
-
-
-def populate_equest_schedule_importer_table(
-    sim_text: str,
-    workbook_path: Path,
-    output_workbook_path: Path,
-) -> Dict[str, object]:
-    """Populate the eQuest Schedule Importer tab from REPORT- LV-G schedule rows."""
-    schedule_result = extract_schedule_table(sim_text)
-    rows = schedule_result["rows"]
-    if USE_OPENPYXL_FOR_WRITES and load_workbook is not None:
-        workbook = load_workbook(workbook_path, keep_vba=True, keep_links=False)
-        sheet = workbook["eQuest Schedule Importer"]
-        start_row = 2
-        max_rows = 79
-        day_columns = {
-            "Sunday": "C",
-            "Monday": "D",
-            "Tuesday": "E",
-            "Wednesday": "F",
-            "Thursday": "G",
-            "Friday": "H",
-            "Saturday": "I",
-        }
-        for idx in range(max_rows):
-            row_number = start_row + idx
-            row_data = _normalize_schedule_row(rows[idx]) if idx < len(rows) else {}
-            sheet[f"A{row_number}"] = row_data.get("Schedule Name", "")
-            sheet[f"B{row_number}"] = row_data.get("Schedule Type", "")
-            day_flags = _for_days_flags(str(row_data.get("FOR_DAYS", "")))
-            for day_name, col in day_columns.items():
-                existing_day_value = str(row_data.get(day_name, "")).strip().upper()
-                if existing_day_value not in {"", "0", "N", "NO"}:
-                    day_flags[day_name] = "X"
-                sheet[f"{col}{row_number}"] = day_flags[day_name]
-            sheet[f"J{row_number}"] = "X" if str(row_data.get("Holiday", "")).strip().upper() not in {"", "0", "N", "NO"} else ""
-            sheet[f"K{row_number}"] = "X" if str(row_data.get("Weekday", "")).strip().upper() not in {"", "0", "N", "NO"} else ""
-            sheet[f"L{row_number}"] = "X" if str(row_data.get("Weekend", "")).strip().upper() not in {"", "0", "N", "NO"} else ""
-            sheet[f"M{row_number}"] = "X" if str(row_data.get("Holiday Check", "")).strip().upper() not in {"", "0", "N", "NO"} else ""
-            for hour in range(1, 25):
-                col = _excel_column_name(13 + hour)
-                sheet[f"{col}{row_number}"] = _schedule_hour_value(row_data, hour)
-        workbook.save(output_workbook_path)
-        return {
-            "target_sheet": "eQuest Schedule Importer",
-            "target_table": "eQuest_Schedule_Importer",
-            "writer": "openpyxl",
-            "rows_written": min(len(rows), max_rows),
-            "rows_available": max_rows,
-            "output_workbook": str(output_workbook_path),
-        }
-    ET.register_namespace("", MAIN_NS)
-    file_map = _load_zip_file_map(workbook_path)
-    schedule_sheet_path = "xl/worksheets/sheet16.xml"
-    if schedule_sheet_path not in file_map:
-        raise ValueError("Could not find eQuest Schedule Importer worksheet XML in workbook.")
-    sheet_root = _parse_xml_with_registered_namespaces(file_map[schedule_sheet_path])
-    sheet_data = sheet_root.find("m:sheetData", NS)
-    if sheet_data is None:
-        raise ValueError("eQuest Schedule Importer sheet is missing sheetData.")
-    start_row = 2
-    max_rows = 79
-    for idx in range(max_rows):
-        row_number = start_row + idx
-        row = _ensure_row(sheet_data, row_number)
-        row_data = _normalize_schedule_row(rows[idx]) if idx < len(rows) else {}
-        _set_inline_string_cell(row, f"A{row_number}", row_data.get("Schedule Name", ""))
-        _set_inline_string_cell(row, f"B{row_number}", row_data.get("Schedule Type", ""))
-        day_columns = {
-            "Sunday": "C",
-            "Monday": "D",
-            "Tuesday": "E",
-            "Wednesday": "F",
-            "Thursday": "G",
-            "Friday": "H",
-            "Saturday": "I",
-        }
-        day_flags = _for_days_flags(str(row_data.get("FOR_DAYS", "")))
-        for day_name, col in day_columns.items():
-            existing_day_value = str(row_data.get(day_name, "")).strip().upper()
-            if existing_day_value not in {"", "0", "N", "NO"}:
-                day_flags[day_name] = "X"
-            _set_inline_string_cell(row, f"{col}{row_number}", day_flags[day_name])
-        _set_inline_string_cell(
-            row,
-            f"J{row_number}",
-            "X" if str(row_data.get("Holiday", "")).strip().upper() not in {"", "0", "N", "NO"} else "",
-        )
-        _set_inline_string_cell(
-            row,
-            f"K{row_number}",
-            "X" if str(row_data.get("Weekday", "")).strip().upper() not in {"", "0", "N", "NO"} else "",
-        )
-        _set_inline_string_cell(
-            row,
-            f"L{row_number}",
-            "X" if str(row_data.get("Weekend", "")).strip().upper() not in {"", "0", "N", "NO"} else "",
-        )
-        _set_inline_string_cell(
-            row,
-            f"M{row_number}",
-            "X" if str(row_data.get("Holiday Check", "")).strip().upper() not in {"", "0", "N", "NO"} else "",
-        )
-        for hour in range(1, 25):
-            col = _excel_column_name(13 + hour)
-            numeric_value = _schedule_hour_value(row_data, hour)
-            _set_numeric_cell(row, f"{col}{row_number}", numeric_value)
-    file_map[schedule_sheet_path] = _serialize_xml_preserving_ignorable_prefixes(
-        sheet_root,
-        file_map[schedule_sheet_path],
-    )
-    _remove_calc_chain_parts(file_map)
-    _save_zip_file_map(file_map, output_workbook_path)
-    return {
-        "target_sheet": "eQuest Schedule Importer",
-        "target_table": "eQuest_Schedule_Importer",
-        "rows_written": min(len(rows), max_rows),
-        "rows_available": max_rows,
-        "output_workbook": str(output_workbook_path),
-    }
-
-
 def _is_onedrive_reference(path_value: Optional[str]) -> bool:
     return bool(path_value and path_value.lower().startswith(ONEDRIVE_PREFIX))
 
@@ -1858,11 +1687,6 @@ def main() -> None:
         help="Path to workbook .xlsm where ECM Data should be populated from BEPS/ES-D.",
     )
     parser.add_argument(
-        "--populate-schedules",
-        type=Path,
-        help="Path to workbook .xlsm where eQuest Schedule Importer should be populated.",
-    )
-    parser.add_argument(
         "--list-reports",
         action="store_true",
         help="List discovered REPORT-* sections in the SIM file and exit.",
@@ -1874,7 +1698,6 @@ def main() -> None:
             args.sim_file,
             str(args.populate_master_room_list) if args.populate_master_room_list else None,
             str(args.update_ecm_data) if args.update_ecm_data else None,
-            str(args.populate_schedules) if args.populate_schedules else None,
             str(args.output_workbook) if args.output_workbook else None,
         ]
     )
@@ -1902,21 +1725,6 @@ def main() -> None:
                 sim_text=sim_text,
                 workbook_path=workbook_path,
                 model_run_type=model_run_type,
-                output_workbook_path=output_path,
-            )
-            if _is_onedrive_reference(str(args.output_workbook)):
-                graph_client.upload_onedrive_file(output_path, _to_onedrive_path(str(args.output_workbook)))
-                result["uploaded_output_workbook"] = str(args.output_workbook)
-            print(json.dumps(result, indent=args.indent))
-            return
-        if args.populate_schedules:
-            if not args.output_workbook:
-                raise ValueError("--output-workbook is required when using --populate-schedules.")
-            workbook_path = _resolve_input_path(str(args.populate_schedules), graph_client, temp_dir, "schedules") if needs_graph else args.populate_schedules
-            output_path = _resolve_output_path(str(args.output_workbook), temp_dir) if needs_graph else args.output_workbook
-            result = populate_equest_schedule_importer_table(
-                sim_text=sim_text,
-                workbook_path=workbook_path,
                 output_workbook_path=output_path,
             )
             if _is_onedrive_reference(str(args.output_workbook)):

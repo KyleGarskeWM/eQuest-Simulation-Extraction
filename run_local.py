@@ -75,15 +75,6 @@ def build_command(config: dict) -> list[str]:
                 config["output_workbook_path"],
             ]
         )
-    elif mode == "schedule_importer":
-        command.extend(
-            [
-                "--populate-schedules",
-                config["workbook_path"],
-                "--output-workbook",
-                config["output_workbook_path"],
-            ]
-        )
     elif mode == "combined":
         raise ValueError("Use build_combined_commands() for mode='combined'.")
     else:
@@ -92,11 +83,10 @@ def build_command(config: dict) -> list[str]:
 
 
 def build_combined_commands(config: dict, master_output_path: str, ecm_output_path: str) -> list[list[str]]:
-    """Build three-step command list: Master Room List -> ECM Data -> Schedule Importer."""
+    """Build two-step command list: Master Room List -> ECM Data."""
     combined_model_run_type = resolve_model_run_type(config, "Baseline")
     sim_file = config["sim_file"]
     workbook_path = config["workbook_path"]
-    output_workbook_path = config["output_workbook_path"]
     return [
         [
             sys.executable,
@@ -119,15 +109,6 @@ def build_combined_commands(config: dict, master_output_path: str, ecm_output_pa
             combined_model_run_type,
             "--output-workbook",
             ecm_output_path,
-        ],
-        [
-            sys.executable,
-            "equest_extractor.py",
-            sim_file,
-            "--populate-schedules",
-            ecm_output_path,
-            "--output-workbook",
-            output_workbook_path,
         ],
     ]
 
