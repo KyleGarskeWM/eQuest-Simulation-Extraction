@@ -25,7 +25,6 @@ from equest_extractor import (
     extract_schedule_table,
     extract_hourly_thermostat_setpoint_ranges,
     populate_master_room_list_space_type_table,
-    populate_equest_schedule_importer_table,
     populate_ecm_data_from_reports,
     resolve_model_run_type,
     extract_es_d_energy_cost_summary,
@@ -99,15 +98,15 @@ class TestBepsExtractor(unittest.TestCase):
         )
         self.assertIn("--update-ecm-data", ecm_command)
 
-        schedule_command = build_command(
-            {
-                "sim_file": "a.sim",
-                "mode": "schedule_importer",
-                "workbook_path": "b.xlsm",
-                "output_workbook_path": "c.xlsm",
-            }
-        )
-        self.assertIn("--populate-schedules", schedule_command)
+        with self.assertRaises(ValueError):
+            build_command(
+                {
+                    "sim_file": "a.sim",
+                    "mode": "schedule_importer",
+                    "workbook_path": "b.xlsm",
+                    "output_workbook_path": "c.xlsm",
+                }
+            )
 
     def test_master_room_list_write_path_skips_openpyxl_to_preserve_workbook_parts(self):
         sim_text = """
@@ -457,6 +456,59 @@ class TestBepsExtractor(unittest.TestCase):
             self.assertFalse(comparison["space_type_table_match"])
             self.assertGreater(comparison["mismatch_count"], 0)
 
+    def test_populate_master_room_list_fills_blank_area_cells(self):
+        workbook_path = Path("Building Performance Assumptions-v2.xlsm")
+        sim_text = """
+        REPORT- LV-B Summary of Spaces
+        Spaces on floor: Level 1
+        Space A                              1.0   INT   10.0    0.80    0.1    0.50   AIR-CHANGE  0.10      100.0      1000.0
+        Space B                              1.0   INT   20.0    0.90    0.2    0.50   AIR-CHANGE  0.10      200.0      1000.0
+        CONDITIONED FLOOR AREA          =       300.0  SQFT
+        REPORT- ES-D Energy Cost Summary
+        UTILITY-RATE                       RESOURCE           METERS              UNITS/YR               ($)     ($/UNIT)   ALL YEAR?
+        Elec                               ELECTRICITY        EM1   COMM       636613. KWH           108224.       0.1700      YES
+        Gas                                NATURAL-GAS        FM1               50910. THERM          59056.       1.1600      YES
+        REPORT- END
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            input_path = Path(temp_dir) / "blank_area_input.xlsm"
+            with zipfile.ZipFile(workbook_path, "r") as src_zip:
+                file_map = {name: src_zip.read(name) for name in src_zip.namelist()}
+            raw_root = _parse_xml_with_registered_namespaces(file_map["xl/worksheets/sheet22.xml"])
+            ns = {"m": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+            for row_number, space_name in ((2, "Space A"), (3, "Space B")):
+                row = raw_root.find(f".//m:row[@r='{row_number}']", ns)
+                name_cell = row.find(f"m:c[@r='C{row_number}']", ns)
+                for child in list(name_cell):
+                    name_cell.remove(child)
+                name_cell.attrib["t"] = "inlineStr"
+                is_node = ET.SubElement(name_cell, "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}is")
+                text_node = ET.SubElement(is_node, "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}t")
+                text_node.text = space_name
+                area_cell = row.find(f"m:c[@r='F{row_number}']", ns)
+                if area_cell is not None:
+                    for child in list(area_cell):
+                        area_cell.remove(child)
+            file_map["xl/worksheets/sheet22.xml"] = ET.tostring(raw_root, encoding="utf-8", xml_declaration=True)
+            with zipfile.ZipFile(input_path, "w", compression=zipfile.ZIP_DEFLATED) as out_zip:
+                for name, payload in file_map.items():
+                    out_zip.writestr(name, payload)
+            output_path = Path(temp_dir) / "blank_area_output.xlsm"
+            populate_master_room_list_space_type_table(
+                sim_text=sim_text,
+                workbook_path=input_path,
+                model_run_type="Baseline",
+                output_workbook_path=output_path,
+            )
+            with zipfile.ZipFile(output_path, "r") as workbook_zip:
+                output_raw = ET.fromstring(workbook_zip.read("xl/worksheets/sheet22.xml"))
+            f2 = output_raw.find(".//m:c[@r='F2']/m:v", ns)
+            f3 = output_raw.find(".//m:c[@r='F3']/m:v", ns)
+            self.assertIsNotNone(f2)
+            self.assertIsNotNone(f3)
+            self.assertAlmostEqual(float(f2.text), 100.0)
+            self.assertAlmostEqual(float(f3.text), 200.0)
+
     def test_resolve_model_run_type_precedence(self):
         self.assertEqual(resolve_model_run_type("ECM-2"), "ECM-2")
         old_value = os.environ.get("MODEL_RUN_TYPE")
@@ -519,41 +571,6 @@ class TestBepsExtractor(unittest.TestCase):
         self.assertEqual(len(result["rows"]), 1)
         self.assertEqual(result["rows"][0]["Schedule Name"], "Office Lights")
         self.assertEqual(result["rows"][0]["1"], "0")
-
-    def test_populate_schedule_importer_table(self):
-        sim_text = """
-        REPORT- SCHEDULES
-        Schedule Name  Schedule Type  Sunday  Monday  Tuesday  Wednesday  Thursday  Friday  Saturday  Holiday  Weekday  Weekend  Holiday Check  1  2  3  4  5  6  7  8  9  10  11  12  13  14  15  16  17  18  19  20  21  22  23  24
-        Office Lights  FRACTION       WD      WD      WD       WD         WD        WD      WE        WE       WD       WE       YES            0  0  0  0  0  0  0.2  0.5  0.8  1.0  1.0  1.0  1.0  1.0  1.0  1.0  0.8  0.6  0.5  0.4  0.2  0.1  0  0
-        REPORT- END
-        """
-        workbook_path = Path("Building Performance Assumptions-v2.xlsm")
-        with tempfile.TemporaryDirectory() as temp_dir:
-            output_path = Path(temp_dir) / "schedule_updated.xlsm"
-            result = populate_equest_schedule_importer_table(
-                sim_text=sim_text,
-                workbook_path=workbook_path,
-                output_workbook_path=output_path,
-            )
-            self.assertEqual(result["target_table"], "eQuest_Schedule_Importer")
-            self.assertEqual(result["rows_written"], 1)
-            with zipfile.ZipFile(output_path, "r") as workbook_zip:
-                sheet = ET.fromstring(workbook_zip.read("xl/worksheets/sheet16.xml"))
-            ns = {"m": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
-            a2 = sheet.find(".//m:c[@r='A2']", ns)
-            b2 = sheet.find(".//m:c[@r='B2']", ns)
-            n2 = sheet.find(".//m:c[@r='N2']/m:v", ns)
-            y2 = sheet.find(".//m:c[@r='Y2']/m:v", ns)
-            self.assertIsNotNone(a2)
-            self.assertIsNotNone(b2)
-            a2_text = "".join(node.text or "" for node in a2.iter("{http://schemas.openxmlformats.org/spreadsheetml/2006/main}t"))
-            b2_text = "".join(node.text or "" for node in b2.iter("{http://schemas.openxmlformats.org/spreadsheetml/2006/main}t"))
-            self.assertEqual(a2_text, "Office Lights")
-            self.assertEqual(b2_text, "FRACTION")
-            self.assertIsNotNone(n2)
-            self.assertIsNotNone(y2)
-            self.assertEqual(float(n2.text), 0.0)
-            self.assertEqual(float(y2.text), 1.0)
 
     def test_extract_hourly_thermostat_setpoint_ranges(self):
         sim_text = """
