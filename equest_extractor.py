@@ -561,15 +561,46 @@ def _ensure_row(sheet_data: ET.Element, row_number: int) -> ET.Element:
     return row
 
 
-def _set_inline_string_cell(row: ET.Element, cell_ref: str, value: str, style: str | None = None) -> None:
+def _excel_column_index(cell_ref: str) -> int:
+    match = re.match(r"^([A-Z]+)", cell_ref.upper())
+    if not match:
+        return math.inf
+    col_letters = match.group(1)
+    col_index = 0
+    for letter in col_letters:
+        col_index = (col_index * 26) + (ord(letter) - ord("A") + 1)
+    return col_index
+
+
+def _ensure_cell(row: ET.Element, cell_ref: str, style: str | None = None) -> ET.Element:
     cell = row.find(f"m:c[@r='{cell_ref}']", NS)
-    if cell is None:
-        attrs = {"r": cell_ref}
-        if style is not None:
-            attrs["s"] = style
-        cell = ET.SubElement(row, f"{{{MAIN_NS}}}c", attrs)
-    elif style is not None and "s" not in cell.attrib:
-        cell.attrib["s"] = style
+    if cell is not None:
+        if style is not None and "s" not in cell.attrib:
+            cell.attrib["s"] = style
+        return cell
+    attrs = {"r": cell_ref}
+    if style is not None:
+        attrs["s"] = style
+    cell = ET.Element(f"{{{MAIN_NS}}}c", attrs)
+    new_col_index = _excel_column_index(cell_ref)
+    inserted = False
+    for existing_child in list(row):
+        if existing_child.tag != f"{{{MAIN_NS}}}c":
+            row.insert(list(row).index(existing_child), cell)
+            inserted = True
+            break
+        existing_ref = existing_child.attrib.get("r", "")
+        if _excel_column_index(existing_ref) > new_col_index:
+            row.insert(list(row).index(existing_child), cell)
+            inserted = True
+            break
+    if not inserted:
+        row.append(cell)
+    return cell
+
+
+def _set_inline_string_cell(row: ET.Element, cell_ref: str, value: str, style: str | None = None) -> None:
+    cell = _ensure_cell(row, cell_ref, style=style)
     for child in list(cell):
         cell.remove(child)
     cell.attrib["t"] = "inlineStr"
@@ -586,14 +617,7 @@ def _sanitize_xml_text(value: str) -> str:
 
 
 def _set_numeric_cell(row: ET.Element, cell_ref: str, value: float | None, style: str | None = None) -> None:
-    cell = row.find(f"m:c[@r='{cell_ref}']", NS)
-    if cell is None:
-        attrs = {"r": cell_ref}
-        if style is not None:
-            attrs["s"] = style
-        cell = ET.SubElement(row, f"{{{MAIN_NS}}}c", attrs)
-    elif style is not None and "s" not in cell.attrib:
-        cell.attrib["s"] = style
+    cell = _ensure_cell(row, cell_ref, style=style)
     for child in list(cell):
         cell.remove(child)
     cell.attrib.pop("t", None)
@@ -616,14 +640,7 @@ def _coerce_finite_float(value: object) -> float | None:
 
 
 def _set_boolean_cell(row: ET.Element, cell_ref: str, value: bool, style: str | None = None) -> None:
-    cell = row.find(f"m:c[@r='{cell_ref}']", NS)
-    if cell is None:
-        attrs = {"r": cell_ref}
-        if style is not None:
-            attrs["s"] = style
-        cell = ET.SubElement(row, f"{{{MAIN_NS}}}c", attrs)
-    elif style is not None and "s" not in cell.attrib:
-        cell.attrib["s"] = style
+    cell = _ensure_cell(row, cell_ref, style=style)
     for child in list(cell):
         cell.remove(child)
     cell.attrib["t"] = "b"
@@ -1627,6 +1644,7 @@ def _for_days_flags(for_days_value: str) -> Dict[str, str]:
 def _normalize_schedule_row(row_data: Dict[str, str]) -> Dict[str, str]:
     """Normalize schedule row keys from different parser formats."""
     normalized: Dict[str, str] = {}
+    hour_key_pattern = re.compile(r"^\s*(\d{1,2})\s*(?:AM|PM)?\s*$", re.IGNORECASE)
     for key, value in row_data.items():
         canonical_key = str(key).strip()
         canonical_key_upper = canonical_key.upper()
@@ -1636,8 +1654,22 @@ def _normalize_schedule_row(row_data: Dict[str, str]) -> Dict[str, str]:
             canonical_key = "Schedule Type"
         elif canonical_key_upper in {"FOR DAYS", "FOR_DAYS"}:
             canonical_key = "FOR_DAYS"
+        else:
+            hour_match = hour_key_pattern.match(canonical_key_upper)
+            if hour_match:
+                hour_value = int(hour_match.group(1))
+                if 1 <= hour_value <= 24:
+                    canonical_key = str(hour_value)
         normalized[canonical_key] = value
     return normalized
+
+
+def _schedule_hour_value(row_data: Dict[str, str], hour: int) -> float | None:
+    value = row_data.get(str(hour))
+    if value in (None, ""):
+        hour_label = f"{hour} AM" if hour <= 11 else ("12 PM" if hour == 12 else ("24 AM" if hour == 24 else f"{hour} PM"))
+        value = row_data.get(hour_label)
+    return _coerce_finite_float(value)
 
 
 def populate_equest_schedule_importer_table(
@@ -1679,9 +1711,7 @@ def populate_equest_schedule_importer_table(
             sheet[f"M{row_number}"] = "X" if str(row_data.get("Holiday Check", "")).strip().upper() not in {"", "0", "N", "NO"} else ""
             for hour in range(1, 25):
                 col = _excel_column_name(13 + hour)
-                hour_label = f"{hour} AM" if hour <= 11 else ("12 PM" if hour == 12 else ("24 AM" if hour == 24 else f"{hour} PM"))
-                value = row_data.get(str(hour), row_data.get(hour_label))
-                sheet[f"{col}{row_number}"] = float(value) if value not in (None, "") else None
+                sheet[f"{col}{row_number}"] = _schedule_hour_value(row_data, hour)
         workbook.save(output_workbook_path)
         return {
             "target_sheet": "eQuest Schedule Importer",
@@ -1745,8 +1775,7 @@ def populate_equest_schedule_importer_table(
         )
         for hour in range(1, 25):
             col = _excel_column_name(13 + hour)
-            value = row_data.get(str(hour))
-            numeric_value = _coerce_finite_float(value)
+            numeric_value = _schedule_hour_value(row_data, hour)
             _set_numeric_cell(row, f"{col}{row_number}", numeric_value)
     file_map[schedule_sheet_path] = _serialize_xml_preserving_ignorable_prefixes(
         sheet_root,
