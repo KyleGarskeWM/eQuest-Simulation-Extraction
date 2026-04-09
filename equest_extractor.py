@@ -88,6 +88,7 @@ MASTER_ROOM_LIST_SHEET_XML_PATH = "xl/worksheets/sheet1.xml"
 MASTER_ROOM_LIST_SPACE_START_ROW = 16
 MASTER_ROOM_LIST_SPACE_MAX_ROWS = 298
 RAW_DATA_EQ_IMPORT_SHEET_XML_PATH = "xl/worksheets/sheet22.xml"
+SHARED_STRINGS_XML_PATH = "xl/sharedStrings.xml"
 RAW_DATA_SPACE_START_ROW = 2
 RAW_DATA_AREA_COLUMN = "F"
 SPACE_TYPE_QAQC_TABLE_START_ROW = 4
@@ -755,15 +756,68 @@ def _load_master_room_list_sheet(workbook_path: Path) -> ET.Element:
     return _parse_xml_with_registered_namespaces(sheet_xml)
 
 
-def _read_cell_text(row: ET.Element, cell_ref: str) -> str:
+def _read_shared_strings(file_map: Dict[str, bytes]) -> List[str]:
+    payload = file_map.get(SHARED_STRINGS_XML_PATH)
+    if payload is None:
+        return []
+    root = ET.fromstring(payload)
+    strings: List[str] = []
+    for si in root.findall("m:si", NS):
+        strings.append("".join(node.text or "" for node in si.findall(".//m:t", NS)))
+    return strings
+
+
+def _read_cell_text(row: ET.Element, cell_ref: str, shared_strings: Optional[List[str]] = None) -> str:
     cell = row.find(f"m:c[@r='{cell_ref}']", NS)
     if cell is None:
         return ""
-    if cell.attrib.get("t") == "inlineStr":
+    cell_type = cell.attrib.get("t")
+    if cell_type == "inlineStr":
         text_parts = [node.text or "" for node in cell.findall(".//m:t", NS)]
         return "".join(text_parts)
     value_node = cell.find("m:v", NS)
-    return value_node.text.strip() if value_node is not None and value_node.text else ""
+    if value_node is None or value_node.text is None:
+        return ""
+    raw_value = value_node.text.strip()
+    if cell_type == "s" and shared_strings is not None:
+        try:
+            index = int(raw_value)
+            if 0 <= index < len(shared_strings):
+                return shared_strings[index]
+        except ValueError:
+            pass
+    return raw_value
+
+
+def _resolve_raw_data_target_columns_from_headers(
+    sheet_data: ET.Element,
+    normalized_model_run_type: str,
+    shared_strings: Optional[List[str]] = None,
+) -> tuple[str, str, str]:
+    default_columns = MODEL_RUN_RAW_DATA_COLUMN_MAP[normalized_model_run_type]
+    header_row = sheet_data.find("m:row[@r='1']", NS)
+    if header_row is None:
+        return default_columns
+    run_label = normalized_model_run_type.upper()
+    targets = {"LPD": None, "EPD": None, "OCC": None}
+    for cell in header_row.findall("m:c", NS):
+        cell_ref = cell.attrib.get("r", "")
+        column_match = re.match(r"([A-Z]+)\d+$", cell_ref)
+        if not column_match:
+            continue
+        header_text = _read_cell_text(header_row, cell_ref, shared_strings=shared_strings).upper()
+        if run_label not in header_text:
+            continue
+        column_name = column_match.group(1)
+        if "LPD" in header_text:
+            targets["LPD"] = column_name
+        elif "EPD" in header_text:
+            targets["EPD"] = column_name
+        elif "OCC" in header_text:
+            targets["OCC"] = column_name
+    if all(targets.values()):
+        return (targets["LPD"], targets["EPD"], targets["OCC"])
+    return default_columns
 
 
 def _read_cell_float(row: ET.Element, cell_ref: str) -> float | None:
@@ -1011,12 +1065,17 @@ def populate_master_room_list_space_type_table(
     raw_data_sheet_data = raw_data_root.find("m:sheetData", NS)
     if raw_data_sheet_data is None:
         raise ValueError("Raw Data - eQuest Import sheet is missing sheetData.")
+    shared_strings = _read_shared_strings(file_map)
     max_rows = MASTER_ROOM_LIST_SPACE_MAX_ROWS
     existing_raw_space_names: List[str] = []
     for index in range(max_rows):
         row_number = RAW_DATA_SPACE_START_ROW + index
         row = raw_data_sheet_data.find(f"m:row[@r='{row_number}']", NS)
-        existing_name = _read_cell_text(row, f"C{row_number}").strip() if row is not None else ""
+        existing_name = (
+            _read_cell_text(row, f"C{row_number}", shared_strings=shared_strings).strip()
+            if row is not None
+            else ""
+        )
         existing_raw_space_names.append(existing_name)
     raw_space_names_previously_present = any(name for name in existing_raw_space_names)
     raw_name_style_template = None
@@ -1038,7 +1097,11 @@ def populate_master_room_list_space_type_table(
                 raw_row_by_space_name[_normalize_space_name(space_name)] = row_number
             else:
                 _set_inline_string_cell(row, f"C{row_number}", "", style=raw_name_style_template)
-    lpd_col, epd_col, occ_col = MODEL_RUN_RAW_DATA_COLUMN_MAP[normalized_model_run_type]
+    lpd_col, epd_col, occ_col = _resolve_raw_data_target_columns_from_headers(
+        raw_data_sheet_data,
+        normalized_model_run_type,
+        shared_strings=shared_strings,
+    )
     lpd_style_template = None
     epd_style_template = None
     occ_style_template = None
@@ -1059,10 +1122,15 @@ def populate_master_room_list_space_type_table(
     skipped_unmatched_spaces = 0
     for index, (space_name, space_data) in enumerate(spaces[:max_rows]):
         row_number = raw_row_by_space_name.get(_normalize_space_name(space_name))
+        mapped_by_name = row_number is not None
         if row_number is None:
-            skipped_unmatched_spaces += 1
-            continue
-        if raw_space_names_previously_present:
+            fallback_row_number = RAW_DATA_SPACE_START_ROW + index
+            if fallback_row_number <= RAW_DATA_SPACE_START_ROW + max_rows - 1:
+                row_number = fallback_row_number
+            else:
+                skipped_unmatched_spaces += 1
+                continue
+        if raw_space_names_previously_present and mapped_by_name:
             matched_existing_spaces += 1
         row = _ensure_row(raw_data_sheet_data, row_number)
         if _read_cell_float(row, f"{RAW_DATA_AREA_COLUMN}{row_number}") is None:
@@ -1275,6 +1343,8 @@ def check_master_room_list_space_type_table_match(sim_text: str, workbook_path: 
     sheet_data = sheet_root.find("m:sheetData", NS)
     if sheet_data is None:
         raise ValueError("Workbook sheet is missing sheetData.")
+    file_map = _load_zip_file_map(workbook_path)
+    shared_strings = _read_shared_strings(file_map)
     mismatches: List[Dict[str, object]] = []
     compared_rows = 0
     for index in range(MASTER_ROOM_LIST_SPACE_MAX_ROWS):
@@ -1282,7 +1352,7 @@ def check_master_room_list_space_type_table_match(sim_text: str, workbook_path: 
         row = sheet_data.find(f"m:row[@r='{row_number}']", NS)
         existing_name = ""
         if row is not None:
-            existing_name = _read_cell_text(row, f"D{row_number}").strip()
+            existing_name = _read_cell_text(row, f"D{row_number}", shared_strings=shared_strings).strip()
         if index < len(expected_spaces):
             expected_name, _ = expected_spaces[index]
             compared_rows += 1

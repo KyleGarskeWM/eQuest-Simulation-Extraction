@@ -442,6 +442,69 @@ class TestBepsExtractor(unittest.TestCase):
             self.assertAlmostEqual(float(g2_out.text), 0.9)
             self.assertAlmostEqual(float(g3_out.text), 0.8)
 
+    def test_populate_master_room_list_writes_proposed_columns_with_shared_string_space_names(self):
+        workbook_path = Path("Building Performance Assumptions-v2.xlsm")
+        sim_text = """
+        REPORT- LV-B Summary of Spaces
+        Spaces on floor: Level 1
+        Space A                              1.0   INT   10.0    0.80    0.1    0.50   AIR-CHANGE  0.10      100.0      1000.0
+        Space B                              1.0   INT   20.0    0.90    0.2    0.50   AIR-CHANGE  0.10      200.0      1000.0
+        CONDITIONED FLOOR AREA          =       300.0  SQFT
+        REPORT- ES-D Energy Cost Summary
+        UTILITY-RATE                       RESOURCE           METERS              UNITS/YR               ($)     ($/UNIT)   ALL YEAR?
+        Elec                               ELECTRICITY        EM1   COMM       636613. KWH           108224.       0.1700      YES
+        Gas                                NATURAL-GAS        FM1               50910. THERM          59056.       1.1600      YES
+        REPORT- END
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            input_path = Path(temp_dir) / "shared_strings_input.xlsm"
+            with zipfile.ZipFile(workbook_path, "r") as src_zip:
+                file_map = {name: src_zip.read(name) for name in src_zip.namelist()}
+            ns = {"m": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+            sst_root = ET.fromstring(file_map["xl/sharedStrings.xml"])
+            initial_count = len(sst_root.findall("m:si", ns))
+            for value in ("Space B", "Space A"):
+                si = ET.SubElement(sst_root, "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}si")
+                t = ET.SubElement(si, "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}t")
+                t.text = value
+            sst_root.attrib["count"] = str(initial_count + 2)
+            sst_root.attrib["uniqueCount"] = str(initial_count + 2)
+            file_map["xl/sharedStrings.xml"] = ET.tostring(sst_root, encoding="utf-8", xml_declaration=True)
+            raw_root = _parse_xml_with_registered_namespaces(file_map["xl/worksheets/sheet22.xml"])
+            row_2 = raw_root.find(".//m:row[@r='2']", ns)
+            row_3 = raw_root.find(".//m:row[@r='3']", ns)
+            c2 = row_2.find("m:c[@r='C2']", ns)
+            c3 = row_3.find("m:c[@r='C3']", ns)
+            for cell, value_index in ((c2, initial_count), (c3, initial_count + 1)):
+                for child in list(cell):
+                    cell.remove(child)
+                cell.attrib["t"] = "s"
+                value_node = ET.SubElement(cell, "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}v")
+                value_node.text = str(value_index)
+            file_map["xl/worksheets/sheet22.xml"] = ET.tostring(raw_root, encoding="utf-8", xml_declaration=True)
+            with zipfile.ZipFile(input_path, "w", compression=zipfile.ZIP_DEFLATED) as out_zip:
+                for name, payload in file_map.items():
+                    out_zip.writestr(name, payload)
+            output_path = Path(temp_dir) / "shared_strings_output.xlsm"
+            result = populate_master_room_list_space_type_table(
+                sim_text=sim_text,
+                workbook_path=input_path,
+                model_run_type="Proposed",
+                output_workbook_path=output_path,
+            )
+            self.assertEqual(result["raw_data_target_columns"], ["J", "K", "L"])
+            self.assertEqual(result["matched_existing_spaces"], 2)
+            with zipfile.ZipFile(output_path, "r") as workbook_zip:
+                output_raw = ET.fromstring(workbook_zip.read("xl/worksheets/sheet22.xml"))
+            j2_out = output_raw.find(".//m:c[@r='J2']/m:v", ns)
+            j3_out = output_raw.find(".//m:c[@r='J3']/m:v", ns)
+            g2_out = output_raw.find(".//m:c[@r='G2']/m:v", ns)
+            g3_out = output_raw.find(".//m:c[@r='G3']/m:v", ns)
+            self.assertAlmostEqual(float(j2_out.text), 0.9)
+            self.assertAlmostEqual(float(j3_out.text), 0.8)
+            self.assertNotEqual(float(g2_out.text), float(j2_out.text))
+            self.assertNotEqual(float(g3_out.text), float(j3_out.text))
+
     def test_non_baseline_comparison_returns_false_when_different(self):
         sim_text = Path("sample_data/St Anselm Baseline ABS_Rev_0 - Baseline Design.SIM").read_text(errors="ignore")
         workbook_path = Path("Building Performance Assumptions.xlsm")
