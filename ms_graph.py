@@ -44,15 +44,40 @@ def first_non_empty(*values: Optional[str]) -> Optional[str]:
     return None
 
 
+def load_json_with_fallback(path: Path) -> dict:
+    """Load JSON from disk with tolerant encoding handling (UTF-8/UTF-16/BOM)."""
+    raw = path.read_bytes()
+    encoding_candidates = []
+    if raw.startswith(b"\xef\xbb\xbf"):
+        encoding_candidates.append("utf-8-sig")
+    elif raw.startswith(b"\xff\xfe") or raw.startswith(b"\xfe\xff"):
+        encoding_candidates.append("utf-16")
+    encoding_candidates.extend(["utf-8", "utf-16"])
+    seen = set()
+    for encoding in encoding_candidates:
+        if encoding in seen:
+            continue
+        seen.add(encoding)
+        try:
+            data = json.loads(raw.decode(encoding))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if not isinstance(data, dict):
+            raise ValueError("GRAPH_CONFIG_PATH JSON must contain an object.")
+        return data
+    raise ValueError(
+        f"Unable to parse Graph config file {path}. "
+        "Ensure it is valid JSON encoded as UTF-8 or UTF-16."
+    )
+
+
 def load_graph_config_from_file(path_value: Optional[str]) -> dict[str, str]:
     if not path_value:
         return {}
     graph_path = Path(path_value).expanduser()
     if not graph_path.exists():
         raise FileNotFoundError(f"Graph config file not found: {graph_path}")
-    data = json.loads(graph_path.read_text(encoding="utf-8"))
-    if not isinstance(data, dict):
-        raise ValueError("GRAPH_CONFIG_PATH JSON must contain an object.")
+    data = load_json_with_fallback(graph_path)
     return {
         "client_id": first_non_empty(data.get("client_id")),
         "tenant_id": first_non_empty(data.get("tenant_id")),
