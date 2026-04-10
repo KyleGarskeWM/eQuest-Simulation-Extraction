@@ -29,6 +29,30 @@ GRAPH_CONFIG_TO_ENV = {
 }
 
 
+def load_json_file(path: Path) -> dict:
+    """Load JSON from disk with tolerant encoding handling (UTF-8/UTF-16/BOM)."""
+    raw = path.read_bytes()
+    encoding_candidates = []
+    if raw.startswith(b"\xef\xbb\xbf"):
+        encoding_candidates.append("utf-8-sig")
+    elif raw.startswith(b"\xff\xfe") or raw.startswith(b"\xfe\xff"):
+        encoding_candidates.append("utf-16")
+    encoding_candidates.extend(["utf-8", "utf-16"])
+    seen = set()
+    for encoding in encoding_candidates:
+        if encoding in seen:
+            continue
+        seen.add(encoding)
+        try:
+            return json.loads(raw.decode(encoding))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            continue
+    raise ValueError(
+        f"Unable to parse JSON config file {path}. "
+        "Ensure it is valid JSON encoded as UTF-8 or UTF-16."
+    )
+
+
 def resolve_graph_config_path(config: dict, config_path: Path) -> str | None:
     graph_config_path = config.get("graph_config_path")
     if graph_config_path in (None, ""):
@@ -142,7 +166,7 @@ def main() -> None:
         raise FileNotFoundError(
             f"Config file not found: {config_path}. Copy local_inputs.template.json to local_inputs.json and edit paths."
         )
-    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config = load_json_file(config_path)
     process_env = build_process_env(config, config_path=config_path)
     script_dir = Path(__file__).resolve().parent
     mode = config.get("mode", "extract_report")

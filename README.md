@@ -150,6 +150,10 @@ python equest_extractor.py "onedrive:/Projects/eQuest/MyModel.SIM" \
   - Close Excel and any other applications that may currently have the workbook or output file open.
   - Close any background automation/processes tied to this workflow that may have an open file handle.
   - Re-run the command after all associated files are closed.
+- **`UnicodeDecodeError` when reading JSON config files**
+  - Power Automate or editor tools may save JSON as UTF-16 with BOM.
+  - `run_local.py` and Graph config loading now accept UTF-8 (with/without BOM) and UTF-16 JSON.
+  - If errors persist, re-save the JSON file as UTF-8 and validate JSON syntax.
 
 ## PyCharm + OneDrive compatibility
 
